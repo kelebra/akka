@@ -89,13 +89,6 @@ private[remote] class SystemMessageDelivery(
               pull(in) // onPull from downstream already called
           }.invoke
         }
-
-        outboundContext.controlSubject.stopped.onComplete {
-          getAsyncCallback[Try[Done]] {
-            case Success(_)     ⇒ completeStage()
-            case Failure(cause) ⇒ failStage(cause)
-          }.invoke
-        }
       }
 
       override def postStop(): Unit = {
@@ -133,6 +126,14 @@ private[remote] class SystemMessageDelivery(
         }
       }
 
+      // ControlMessageObserver, external call
+      override def controlSubjectCompleted(signal: Try[Done]): Unit = {
+        getAsyncCallback[Try[Done]] {
+          case Success(_)     ⇒ completeStage()
+          case Failure(cause) ⇒ failStage(cause)
+        }.invoke(signal)
+      }
+
       private val ackCallback = getAsyncCallback[Ack] { reply ⇒
         ack(reply.seqNo)
       }
@@ -156,6 +157,7 @@ private[remote] class SystemMessageDelivery(
         if (!unacknowledged.isEmpty &&
           unacknowledged.peek().message.asInstanceOf[SystemMessageEnvelope].seqNo <= ackedSeqNo) {
           unacknowledged.removeFirst()
+          outboundContext.associationState.pendingSystemMessagesCount.decrementAndGet()
           if (unacknowledged.isEmpty)
             cancelTimer(resendInterval)
 

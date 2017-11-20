@@ -399,7 +399,7 @@ private[remote] abstract class InboundCompression[T >: Null](
             if (association.associationState.isQuarantined(originUid)) {
               // FIXME cleanup compresssion for quarantined associations, see #23967
               log.debug("Ignoring {} for quarantined originUid [{}].", Logging.simpleName(tables.activeTable), originUid)
-            } else if (alive) {
+            } else if (alive && association.isActive()) {
               val table = prepareCompressionAdvertisement(tables.nextTable.version)
               // TODO expensive, check if building the other way wouldn't be faster?
               val nextState = tables.copy(nextTable = table.invert, advertisementInProgress = Some(table))

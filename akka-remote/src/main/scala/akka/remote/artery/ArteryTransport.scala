@@ -10,6 +10,8 @@ import java.nio.channels.ServerSocketChannel
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.annotation.tailrec
@@ -36,7 +38,6 @@ import akka.remote.RemoteActorRefProvider
 import akka.remote.RemoteTransport
 import akka.remote.ThisActorSystemQuarantinedEvent
 import akka.remote.UniqueAddress
-import akka.remote.artery.ArteryTransport.ShuttingDown
 import akka.remote.artery.Decoder.InboundCompressionAccess
 import akka.remote.artery.Encoder.OutboundCompressionAccess
 import akka.remote.artery.InboundControlJunction.ControlMessageObserver
@@ -101,6 +102,8 @@ private[remote] object AssociationState {
     new AssociationState(
       incarnation = 1,
       uniqueRemoteAddressPromise = Promise(),
+      pendingSystemMessagesCount = new AtomicInteger,
+      lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
       quarantined = ImmutableLongMap.empty[QuarantinedTimestamp])
 
   final case class QuarantinedTimestamp(nanoTime: Long) {
@@ -115,6 +118,8 @@ private[remote] object AssociationState {
 private[remote] final class AssociationState(
   val incarnation:                Int,
   val uniqueRemoteAddressPromise: Promise[UniqueAddress],
+  val pendingSystemMessagesCount: AtomicInteger,
+  val lastUsedTimestamp:          AtomicLong,
   val quarantined:                ImmutableLongMap[AssociationState.QuarantinedTimestamp]) {
 
   import AssociationState.QuarantinedTimestamp
@@ -142,7 +147,8 @@ private[remote] final class AssociationState(
   }
 
   def newIncarnation(remoteAddressPromise: Promise[UniqueAddress]): AssociationState =
-    new AssociationState(incarnation + 1, remoteAddressPromise, quarantined)
+    new AssociationState(incarnation + 1, remoteAddressPromise, pendingSystemMessagesCount = new AtomicInteger,
+      lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()), quarantined)
 
   def newQuarantined(): AssociationState =
     uniqueRemoteAddressPromise.future.value match {
@@ -150,6 +156,8 @@ private[remote] final class AssociationState(
         new AssociationState(
           incarnation,
           uniqueRemoteAddressPromise,
+          pendingSystemMessagesCount = new AtomicInteger,
+          lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
           quarantined = quarantined.updated(a.uid, QuarantinedTimestamp(System.nanoTime())))
       case _ ⇒ this
     }
@@ -199,6 +207,11 @@ private[remote] trait OutboundContext {
    * address of this association. It will be sent over the control sub-channel.
    */
   def sendControl(message: ControlMessage): Unit
+
+  /**
+   * @return `true` if any of the streams are active (not stopped due to idle)
+   */
+  def isActive(): Boolean
 
   /**
    * An outbound stage can listen to control messages
@@ -551,6 +564,8 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
           case ShuttingDown ⇒ // silence it
         }
       }
+
+      override def controlSubjectCompleted(signal: Try[Done]): Unit = ()
     })
 
   }
