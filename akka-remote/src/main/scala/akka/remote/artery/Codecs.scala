@@ -247,6 +247,9 @@ private[remote] object Decoder {
     def runNextActorRefAdvertisement(): Unit
     /** For testing purposes, usually triggered by timer from within Decoder stage. */
     def runNextClassManifestAdvertisement(): Unit
+    /** For testing purposes */
+    def currentCompressionOriginUids: Future[Set[Long]]
+
   }
 
   private[remote] trait InboundCompressionAccessImpl extends InboundCompressionAccess {
@@ -275,6 +278,9 @@ private[remote] object Decoder {
     private val runNextClassManifestAdvertisementCb = getAsyncCallback[Unit] {
       _ ⇒ compressions.runNextClassManifestAdvertisement()
     }
+    private val currentCompressionOriginUidsCb = getAsyncCallback[Promise[Set[Long]]] { p ⇒
+      p.success(compressions.currentOriginUids)
+    }
 
     // TODO in practice though all those CB's will always succeed, no need for the futures etc IMO
 
@@ -289,6 +295,7 @@ private[remote] object Decoder {
       }
       done.future
     }
+
     /**
      * External call from ChangeInboundCompression materialized value
      */
@@ -300,6 +307,7 @@ private[remote] object Decoder {
       }
       done.future
     }
+
     /**
      * External call from ChangeInboundCompression materialized value
      */
@@ -310,16 +318,27 @@ private[remote] object Decoder {
       }
       done.future
     }
+
     /**
      * External call from ChangeInboundCompression materialized value
      */
     override def runNextActorRefAdvertisement(): Unit =
       runNextActorRefAdvertisementCb.invoke(())
+
     /**
      * External call from ChangeInboundCompression materialized value
      */
     override def runNextClassManifestAdvertisement(): Unit =
       runNextClassManifestAdvertisementCb.invoke(())
+
+    /**
+     * External call from ChangeInboundCompression materialized value
+     */
+    override def currentCompressionOriginUids: Future[Set[Long]] = {
+      val p = Promise[Set[Long]]
+      currentCompressionOriginUidsCb.invoke(p)
+      p.future
+    }
   }
 
   private[remote] class AccessInboundCompressionFailed

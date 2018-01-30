@@ -14,6 +14,9 @@ import akka.testkit.TestKit
 class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
   akka.loglevel=DEBUG
   akka.remote.artery.advanced.stop-idle-outbound-after = 1 s
+  akka.remote.artery.advanced.compression {
+    actor-refs.advertisement-interval = 5 seconds
+  }
   """) with ImplicitSender with Eventually {
 
   "Outbound streams" should {
@@ -106,6 +109,28 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
         association.associationState.pendingSystemMessagesCount.decrementAndGet()
         Thread.sleep(3.seconds.toMillis)
         eventually(association.isStreamActive(Association.ControlQueueIndex) shouldBe false)
+    }
+
+    "remove inbound compression after quarantine" in withAssociation {
+      (remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+
+        val association = localArtery.association(remoteAddress)
+        val remoteUid = association.associationState.uniqueRemoteAddress.futureValue.uid
+
+        localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid)
+
+        eventually {
+          association.isStreamActive(Association.ControlQueueIndex) shouldBe false
+          association.isStreamActive(Association.OrdinaryQueueIndex) shouldBe false
+        }
+        // compression still exists when idle
+        localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid)
+
+        localArtery.quarantine(remoteAddress, Some(remoteUid), "Test")
+        // after quarantine it should be removed
+        eventually {
+          localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should not contain (remoteUid)
+        }
     }
 
     /**

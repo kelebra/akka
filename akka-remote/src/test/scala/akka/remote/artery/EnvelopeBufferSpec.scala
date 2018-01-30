@@ -55,6 +55,7 @@ abstract class EnvelopeBufferSpec(version: Byte) extends AkkaSpec {
 
     override def runNextActorRefAdvertisement(): Unit = ???
     override def runNextClassManifestAdvertisement(): Unit = ???
+    override def currentOriginUids: Set[Long] = ???
   }
 
   "EnvelopeBuffer" must {
