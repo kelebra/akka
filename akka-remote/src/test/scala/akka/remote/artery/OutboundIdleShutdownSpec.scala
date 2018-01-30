@@ -3,13 +3,17 @@
  */
 package akka.remote.artery
 
-import akka.actor.{ ActorRef, Address, RootActorPath }
-import akka.remote.RARP
-import akka.testkit.{ ImplicitSender, TestActors, TestProbe }
-import org.scalatest.concurrent.Eventually
 import scala.concurrent.duration._
 
-import akka.testkit.TestKit
+import akka.actor.ActorRef
+import akka.actor.ActorSystem
+import akka.actor.Address
+import akka.actor.RootActorPath
+import akka.remote.RARP
+import akka.testkit.ImplicitSender
+import akka.testkit.TestActors
+import akka.testkit.TestProbe
+import org.scalatest.concurrent.Eventually
 
 class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
   akka.loglevel=DEBUG
@@ -22,7 +26,7 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
   "Outbound streams" should {
 
     "eliminate an association when all streams within are idle" in withAssociation {
-      (remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
 
         val association = localArtery.association(remoteAddress)
         withClue("When initiating a connection, both the control - and ordinary streams are opened (regardless of which one was used)") {
@@ -41,7 +45,7 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
     }
 
     "have individual (in)active cycles" in withAssociation {
-      (remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
 
         val association = localArtery.association(remoteAddress)
 
@@ -63,7 +67,7 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
     }
 
     "still be resumable after the association has been cleaned" in withAssociation {
-      (remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
         val firstAssociation = localArtery.association(remoteAddress)
 
         eventually {
@@ -86,7 +90,7 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
     }
 
     "not deactivate if there are unacknowledged system messages" in withAssociation {
-      (remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
         val association = localArtery.association(remoteAddress)
 
         val associationState = association.associationState
@@ -98,7 +102,7 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
     }
 
     "be dropped after the last outbound system message is acknowledged and the idle period has passed" in withAssociation {
-      (remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
 
         val association = RARP(system).provider.transport.asInstanceOf[ArteryTransport].association(remoteAddress)
 
@@ -112,7 +116,7 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
     }
 
     "remove inbound compression after quarantine" in withAssociation {
-      (remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
 
         val association = localArtery.association(remoteAddress)
         val remoteUid = association.associationState.uniqueRemoteAddress.futureValue.uid
@@ -133,13 +137,55 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
         }
     }
 
+    "remove inbound compression after restart with same host:port" in withAssociation {
+      (remoteSystem, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+
+        val association = localArtery.association(remoteAddress)
+        val remoteUid = association.associationState.uniqueRemoteAddress.futureValue.uid
+
+        localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid)
+
+        shutdown(remoteSystem)
+
+        val remoteSystem2 = newRemoteSystem(Some(s"""
+          akka.remote.artery.canonical.hostname = ${remoteAddress.host.get}
+          akka.remote.artery.canonical.port = ${remoteAddress.port.get}
+          """), name = Some(remoteAddress.system))
+        try {
+
+          remoteSystem2.actorOf(TestActors.echoActorProps, "echo2")
+
+          def remoteEcho = system.actorSelection(RootActorPath(remoteAddress) / "user" / "echo2")
+          val echoRef = eventually {
+            remoteEcho.resolveOne(1.seconds).futureValue
+          }
+
+          echoRef.tell("ping2", localProbe.ref)
+          localProbe.expectMsg("ping2")
+
+          val association2 = localArtery.association(remoteAddress)
+          val remoteUid2 = association2.associationState.uniqueRemoteAddress.futureValue.uid
+
+          remoteUid2 should !==(remoteUid)
+
+          eventually {
+            localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid2)
+          }
+          eventually {
+            localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should not contain (remoteUid)
+          }
+        } finally {
+          shutdown(remoteSystem2)
+        }
+    }
+
     /**
      * Test setup fixture:
      * 1. A 'remote' ActorSystem is created to spawn an Echo actor,
      * 2. A TestProbe is spawned locally to initiate communication with the Echo actor
      * 3. Details (remoteAddress, remoteEcho, localArtery, localProbe) are supplied to the test
      */
-    def withAssociation(test: (Address, ActorRef, ArteryTransport, TestProbe) ⇒ Any): Unit = {
+    def withAssociation(test: (ActorSystem, Address, ActorRef, ArteryTransport, TestProbe) ⇒ Any): Unit = {
       val remoteSystem = newRemoteSystem()
       try {
         remoteSystem.actorOf(TestActors.echoActorProps, "echo")
@@ -150,12 +196,12 @@ class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
         val echoRef = remoteEcho.resolveOne(3.seconds).futureValue
         val localProbe = new TestProbe(localSystem)
 
-        remoteEcho.tell("ping", localProbe.ref)
+        echoRef.tell("ping", localProbe.ref)
         localProbe.expectMsg("ping")
 
         val artery = RARP(system).provider.transport.asInstanceOf[ArteryTransport]
 
-        test(remoteAddress, echoRef, artery, localProbe)
+        test(remoteSystem, remoteAddress, echoRef, artery, localProbe)
 
       } finally {
         shutdown(remoteSystem)
