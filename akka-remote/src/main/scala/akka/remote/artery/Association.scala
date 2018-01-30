@@ -13,6 +13,7 @@ import scala.annotation.tailrec
 import scala.concurrent.Future
 import scala.concurrent.Promise
 import scala.concurrent.duration._
+
 import akka.{ Done, NotUsed }
 import akka.actor.ActorRef
 import akka.actor.ActorSelectionMessage
@@ -40,9 +41,10 @@ import akka.util.{ Unsafe, WildcardIndex }
 import akka.util.OptionVal
 import org.agrona.concurrent.ManyToOneConcurrentArrayQueue
 import akka.stream.SharedKillSwitch
-
 import scala.util.control.NoStackTrace
+
 import akka.actor.Cancellable
+import akka.stream.StreamTcpException
 
 /**
  * INTERNAL API
@@ -88,9 +90,12 @@ private[remote] object Association {
   final val LargeQueueIndex = 1
   final val OrdinaryQueueIndex = 2
 
-  private object OutboundStreamStopSignal extends RuntimeException with NoStackTrace
+  sealed trait StopSignal
+  case object OutboundStreamStopIdleSignal extends RuntimeException("") with StopSignal with NoStackTrace
+  case object OutboundStreamStopQuarantinedSignal extends RuntimeException("") with StopSignal with NoStackTrace
 
-  final case class OutboundStreamMatValues(streamKillSwitch: SharedKillSwitch, completed: Future[Done])
+  final case class OutboundStreamMatValues(streamKillSwitch: SharedKillSwitch, completed: Future[Done],
+                                           stopping: Option[StopSignal])
 }
 
 /**
@@ -474,8 +479,10 @@ private[remote] class Association(
     cancelQuarantinedIdleTimer()
     quarantinedIdleTask.set(Some(transport.system.scheduler.scheduleOnce(advancedSettings.StopQuarantinedAfterIdle) {
       if (associationState.isQuarantined())
-        streamMatValues.get.valuesIterator.foreach {
-          case OutboundStreamMatValues(killSwitch, _) ⇒ killSwitch.abort(OutboundStreamStopSignal)
+        streamMatValues.get.foreach {
+          case (queueIndex, OutboundStreamMatValues(killSwitch, _, _)) ⇒
+            setStopReason(queueIndex, OutboundStreamStopQuarantinedSignal)
+            killSwitch.abort(OutboundStreamStopQuarantinedSignal)
         }
     }(transport.system.dispatcher)))
   }
@@ -494,11 +501,12 @@ private[remote] class Association(
       if (System.currentTimeMillis() - associationState.lastUsedTimestamp.get >= stopIdleOutboundAfterMillis) {
         var allStopped = true
         streamMatValues.get.foreach {
-          case (queueIndex, OutboundStreamMatValues(killSwitch, _)) ⇒
+          case (queueIndex, OutboundStreamMatValues(killSwitch, _, _)) ⇒
             if (isStreamActive(queueIndex)) {
               if (queueIndex != ControlQueueIndex || associationState.pendingSystemMessagesCount.get == 0) {
                 log.debug("Stopping idle outbound stream [{}] to [{}]", queueIndex, remoteAddress)
-                killSwitch.abort(OutboundStreamStopSignal)
+                setStopReason(queueIndex, OutboundStreamStopIdleSignal)
+                killSwitch.abort(OutboundStreamStopIdleSignal)
               } else {
                 log.debug(
                   "Couldn't stop idle outbound control stream to [{}] due to [{}] pending system messages",
@@ -722,32 +730,46 @@ private[remote] class Association(
         // shutdown as expected
         // countDown the latch in case threads are waiting on the latch in outboundControlIngress method
         materializing.countDown()
-      case _: AeronTerminated ⇒ // shutdown already in progress
       case cause if transport.isShutdown ⇒
         // don't restart after shutdown, but log some details so we notice
-        log.error(cause, s"{} to [{}] failed after shutdown. {}", streamName, remoteAddress, cause.getMessage)
+        // for the TCP transport the OutboundStreamStopSignal is "converted" to StreamTcpException
+        if (!cause.isInstanceOf[StreamTcpException])
+          log.error(cause, s"{} to [{}] failed after shutdown. {}", streamName, remoteAddress, cause.getMessage)
         // countDown the latch in case threads are waiting on the latch in outboundControlIngress method
         materializing.countDown()
+      case _: AeronTerminated            ⇒ // shutdown already in progress
       case _: AbruptTerminationException ⇒ // ActorSystem shutdown
-      case OutboundStreamStopSignal ⇒
-        // stop as expected due to quarantine
-        log.debug("{} to [{}] stopped. It will be restarted if used again.", streamName, remoteAddress)
-        lazyRestart()
       case cause: GaveUpMessageException ⇒
         log.debug("{} to [{}] failed. Restarting it. {}", streamName, remoteAddress, cause.getMessage)
         // restart unconditionally, without counting restarts
         lazyRestart()
       case cause ⇒
-        if (queueIndex == ControlQueueIndex) {
+
+        // it might have been stopped as expected due to idle or quarantine
+        // for the TCP transport the OutboundStreamStopSignal is "converted" to StreamTcpException
+        val stoppedIdle = cause == OutboundStreamStopIdleSignal ||
+          getStopReason(queueIndex).contains(OutboundStreamStopIdleSignal)
+        val stoppedQuarantined = cause == OutboundStreamStopQuarantinedSignal ||
+          getStopReason(queueIndex).contains(OutboundStreamStopQuarantinedSignal)
+
+        if (queueIndex == ControlQueueIndex && !stoppedQuarantined) {
           cause match {
             case _: HandshakeTimeoutException ⇒ // ok, quarantine not possible without UID
             case _ ⇒
-              // FIXME can we avoid quarantine if all system messages have been delivered?
-              quarantine("Outbound control stream restarted")
+              // must quarantine if all system messages haven't been delivered
+              val pending = associationState.pendingSystemMessagesCount.get
+              if (pending != 0)
+                quarantine(s"Outbound control stream restarted with [$pending] system messages. $cause")
           }
         }
 
-        if (restartCounter.restart()) {
+        if (stoppedIdle) {
+          log.debug("{} to [{}] was idle and stopped. It will be restarted if used again.", streamName, remoteAddress)
+          lazyRestart()
+        } else if (stoppedQuarantined) {
+          log.debug("{} to [{}] was quarantined and stopped. It will be restarted if used again.", streamName, remoteAddress)
+          lazyRestart()
+        } else if (restartCounter.restart()) {
           log.error(cause, "{} to [{}] failed. Restarting it. {}", streamName, remoteAddress, cause.getMessage)
           lazyRestart()
         } else {
@@ -760,13 +782,32 @@ private[remote] class Association(
 
   private def updateStreamMatValues(streamId: Int, streamKillSwitch: SharedKillSwitch, completed: Future[Done]): Unit = {
     implicit val ec = materializer.executionContext
-    updateStreamMatValues(streamId, OutboundStreamMatValues(streamKillSwitch, completed.recover { case _ ⇒ Done }))
+    updateStreamMatValues(
+      streamId,
+      OutboundStreamMatValues(streamKillSwitch, completed.recover { case _ ⇒ Done }, stopping = None))
   }
 
   @tailrec private def updateStreamMatValues(streamId: Int, values: OutboundStreamMatValues): Unit = {
     val prev = streamMatValues.get()
     if (!streamMatValues.compareAndSet(prev, prev + (streamId → values))) {
       updateStreamMatValues(streamId, values)
+    }
+  }
+
+  @tailrec private def setStopReason(streamId: Int, stopSignal: StopSignal): Unit = {
+    val prev = streamMatValues.get()
+    prev.get(streamId) match {
+      case Some(v) ⇒
+        if (!streamMatValues.compareAndSet(prev, prev.updated(streamId, v.copy(stopping = Some(stopSignal)))))
+          setStopReason(streamId, stopSignal)
+      case None ⇒ throw new IllegalStateException(s"Expected streamMatValues for [$streamId]")
+    }
+  }
+
+  private def getStopReason(streamId: Int): Option[StopSignal] = {
+    streamMatValues.get().get(streamId) match {
+      case Some(OutboundStreamMatValues(_, _, stopping)) ⇒ stopping
+      case None ⇒ None
     }
   }
 
@@ -777,7 +818,7 @@ private[remote] class Association(
   def streamsCompleted: Future[Done] = {
     implicit val ec = materializer.executionContext
     Future.sequence(streamMatValues.get().values.map {
-      case OutboundStreamMatValues(_, done) ⇒ done
+      case OutboundStreamMatValues(_, done, _) ⇒ done
     }).map(_ ⇒ Done)
   }
 

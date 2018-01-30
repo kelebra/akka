@@ -16,7 +16,7 @@ import akka.testkit.TestProbe
 import org.scalatest.concurrent.Eventually
 
 class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec("""
-  akka.loglevel=DEBUG
+  akka.loglevel=INFO
   akka.remote.artery.advanced.stop-idle-outbound-after = 1 s
   akka.remote.artery.advanced.compression {
     actor-refs.advertisement-interval = 5 seconds
