@@ -21,6 +21,20 @@ ProblemFilters.exclude[ReversedMissingMethodProblem]("akka.remote.artery.EventSi
 ProblemFilters.exclude[ReversedMissingMethodProblem]("akka.remote.artery.EventSink.alert")
 ProblemFilters.exclude[DirectMissingMethodProblem]("akka.remote.artery.FlightRecorderEvents.Transport_AeronStarted")
 
+# #23967 Stop unused Artery outbound streams
+ProblemFilters.exclude[Problem]("akka.remote.artery.InboundControlJunction*")
+ProblemFilters.exclude[Problem]("akka.remote.artery.Association*")
+ProblemFilters.exclude[Problem]("akka.remote.artery.OutboundContext*")
+ProblemFilters.exclude[Problem]("akka.remote.artery.Decoder*")
+ProblemFilters.exclude[Problem]("akka.remote.artery.AssociationState*")
+ProblemFilters.exclude[Problem]("akka.remote.artery.compress.InboundCompressions*")
+
+
+
+
+
+
+
 
 
 
