@@ -13,26 +13,22 @@ import scala.annotation.tailrec
 import scala.concurrent.Future
 import scala.concurrent.Promise
 import scala.concurrent.duration._
-import scala.concurrent.duration.FiniteDuration
 import akka.{ Done, NotUsed }
 import akka.actor.ActorRef
 import akka.actor.ActorSelectionMessage
 import akka.actor.Address
 import akka.dispatch.sysmsg.SystemMessage
 import akka.event.Logging
-import akka.pattern.after
 import akka.remote._
 import akka.remote.DaemonMsgCreate
 import akka.remote.QuarantinedEvent
 import akka.remote.artery.AeronSink.GaveUpMessageException
 import akka.remote.artery.ArteryTransport.{ AeronTerminated, ShuttingDown }
 import akka.remote.artery.Encoder.OutboundCompressionAccess
-import akka.remote.artery.Encoder.AccessOutboundCompressionFailed
 import akka.remote.artery.InboundControlJunction.ControlMessageSubject
 import akka.remote.artery.OutboundControlJunction.OutboundControlIngress
 import akka.remote.artery.OutboundHandshake.HandshakeTimeoutException
 import akka.remote.artery.SystemMessageDelivery.ClearSystemMessageDelivery
-import akka.remote.artery.compress.CompressionProtocol._
 import akka.remote.artery.compress.CompressionTable
 import akka.stream.AbruptTerminationException
 import akka.stream.KillSwitches
@@ -161,11 +157,9 @@ private[remote] class Association(
   private[remote] def changeActorRefCompression(table: CompressionTable[ActorRef]): Future[Done] = {
     import transport.system.dispatcher
     val c = outboundCompressionAccess
-    val result =
-      if (c.isEmpty) Future.successful(Done)
-      else if (c.size == 1) c.head.changeActorRefCompression(table)
-      else Future.sequence(c.map(_.changeActorRefCompression(table))).map(_ ⇒ Done)
-    timeoutAfter(result, changeCompressionTimeout, new AccessOutboundCompressionFailed)
+    if (c.isEmpty) Future.successful(Done)
+    else if (c.size == 1) c.head.changeActorRefCompression(table)
+    else Future.sequence(c.map(_.changeActorRefCompression(table))).map(_ ⇒ Done)
   }
   // keyed by stream queue index
   private[this] val streamMatValues = new AtomicReference(Map.empty[Int, OutboundStreamMatValues])
@@ -176,21 +170,17 @@ private[remote] class Association(
   private[remote] def changeClassManifestCompression(table: CompressionTable[String]): Future[Done] = {
     import transport.system.dispatcher
     val c = outboundCompressionAccess
-    val result =
-      if (c.isEmpty) Future.successful(Done)
-      else if (c.size == 1) c.head.changeClassManifestCompression(table)
-      else Future.sequence(c.map(_.changeClassManifestCompression(table))).map(_ ⇒ Done)
-    timeoutAfter(result, changeCompressionTimeout, new AccessOutboundCompressionFailed)
+    if (c.isEmpty) Future.successful(Done)
+    else if (c.size == 1) c.head.changeClassManifestCompression(table)
+    else Future.sequence(c.map(_.changeClassManifestCompression(table))).map(_ ⇒ Done)
   }
 
   private def clearOutboundCompression(): Future[Done] = {
     import transport.system.dispatcher
     val c = outboundCompressionAccess
-    val result =
-      if (c.isEmpty) Future.successful(Done)
-      else if (c.size == 1) c.head.clearCompression()
-      else Future.sequence(c.map(_.clearCompression())).map(_ ⇒ Done)
-    timeoutAfter(result, changeCompressionTimeout, new AccessOutboundCompressionFailed)
+    if (c.isEmpty) Future.successful(Done)
+    else if (c.size == 1) c.head.clearCompression()
+    else Future.sequence(c.map(_.clearCompression())).map(_ ⇒ Done)
   }
 
   private def clearInboundCompression(originUid: Long): Unit =
@@ -198,12 +188,6 @@ private[remote] class Association(
       case OptionVal.Some(access) ⇒ access.closeCompressionFor(originUid)
       case _                      ⇒ // do nothing
     }
-
-  private def timeoutAfter[T](f: Future[T], timeout: FiniteDuration, e: ⇒ Throwable): Future[T] = {
-    import transport.system.dispatcher
-    val f2 = after(timeout, transport.system.scheduler)(Future.failed(e))
-    Future.firstCompletedOf(List(f, f2))
-  }
 
   private def deadletters = transport.system.deadLetters
 
