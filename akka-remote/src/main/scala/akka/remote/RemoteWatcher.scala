@@ -121,6 +121,11 @@ private[akka] class RemoteWatcher(
     failureDetectorReaperTask.cancel()
   }
 
+  override protected[akka] def aroundReceive(receive: Receive, msg: Any): Unit = {
+    println(s"# RemoteWatcher $self got $msg") // FIXME
+    super.aroundReceive(receive, msg)
+  }
+
   def receive = {
     case HeartbeatTick                             ⇒ sendHeartbeat()
     case Heartbeat | ArteryHeartbeat               ⇒ receiveHeartbeat()

@@ -167,6 +167,9 @@ abstract class AeronStreamLatencySpec
     stats.print(System.out)
   }
 
+  def sendToDeadLetters[T](pending: Vector[T]): Unit =
+    pending.foreach(system.deadLetters ! _)
+
   val scenarios = List(
     TestSettings(
       testName = "rate-100-size-100",
@@ -258,7 +261,7 @@ abstract class AeronStreamLatencySpec
             envelope
           }
 
-        val queueValue = Source.fromGraph(new SendQueue[Unit](system.deadLetters))
+        val queueValue = Source.fromGraph(new SendQueue[Unit](sendToDeadLetters))
           .via(sendFlow)
           .to(new AeronSink(channel(second), streamId, aeron, taskRunner, pool, giveUpMessageAfter, IgnoreEventSink))
           .run()

@@ -35,6 +35,11 @@ object SystemMessageDeliverySpec {
   val config = ConfigFactory.parseString(
     """
        akka.loglevel = DEBUG
+       akka.remote.artery.advanced.stop-idle-outbound-after = 1000 ms
+       akka.remote.artery.advanced.inject-handshake-interval = 500 ms
+       akka.remote.watch-failure-detector.heartbeat-interval = 2 s
+       akka.remote.artery.log-received-messages = on
+       akka.remote.artery.log-sent-messages = on
     """.stripMargin).withFallback(ArterySpecSupport.defaultConfig)
 
 }
@@ -103,7 +108,7 @@ class SystemMessageDeliverySpec extends ArteryMultiNodeSpec(SystemMessageDeliver
   "System messages" must {
 
     "be delivered with real actors" in {
-      systemB.actorOf(TestActors.echoActorProps, "echo")
+      val systemBRef = systemB.actorOf(TestActors.echoActorProps, "echo")
 
       val remoteRef = {
         system.actorSelection(rootB / "user" / "echo") ! Identify(None)
@@ -111,9 +116,44 @@ class SystemMessageDeliverySpec extends ArteryMultiNodeSpec(SystemMessageDeliver
       }
 
       watch(remoteRef)
-      remoteRef ! PoisonPill
+      systemB.stop(systemBRef)
       expectTerminated(remoteRef)
     }
+
+    "be delivered when concurrent idle stopping" in {
+      // it's configured with short stop-idle-outbound-after to stress exercise stopping of idle outbound streams
+      // at the same time as system messages are sent
+
+      val systemBRef = systemB.actorOf(TestActors.echoActorProps, "echo2")
+
+      val remoteRef = {
+        system.actorSelection(rootB / "user" / "echo2") ! Identify(None)
+        expectMsgType[ActorIdentity].ref.get
+      }
+
+      val idleTimeout = RARP(system).provider.transport.asInstanceOf[ArteryTransport].settings.Advanced.StopIdleOutboundAfter
+      val rnd = ThreadLocalRandom.current()
+
+      //      (1 to 2).foreach { _ ⇒
+      //        (1 to 1).foreach { _ ⇒
+      //          watch(remoteRef)
+      //          unwatch(remoteRef)
+      //        }
+      //        Thread.sleep((idleTimeout - 10.millis).toMillis + rnd.nextInt(20))
+      //      }
+
+      // FIXME this simple test is failing, looks like the DeathWatchNotification is sent and acked but never delivered to the RemoteWatcher,
+      // and the reason is that the sequenceNumber is starting from beginning again when SystemMessageDelivery stage is restarted
+      Thread.sleep(3000)
+
+      watch(remoteRef)
+      remoteRef ! "ping2"
+      expectMsg("ping2")
+      systemB.stop(systemBRef)
+      expectTerminated(remoteRef, 5.seconds)
+    }
+
+    /* FIXME enable again
 
     "be flushed on shutdown" in {
       val systemC = ActorSystem("systemC", system.settings.config)
@@ -270,5 +310,6 @@ class SystemMessageDeliverySpec extends ArteryMultiNodeSpec(SystemMessageDeliver
 
       Await.result(output, 20.seconds) should ===((1 to N).map(n ⇒ TestSysMsg("msg-" + n)).toVector)
     }
+    */
   }
 }

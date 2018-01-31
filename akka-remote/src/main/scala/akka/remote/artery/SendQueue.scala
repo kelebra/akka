@@ -47,7 +47,8 @@ private[remote] object SendQueue {
 /**
  * INTERNAL API
  */
-private[remote] final class SendQueue[T](deadLetters: ActorRef) extends GraphStageWithMaterializedValue[SourceShape[T], SendQueue.QueueValue[T]] {
+private[remote] final class SendQueue[T](postStopAction: Vector[T] ⇒ Unit)
+  extends GraphStageWithMaterializedValue[SourceShape[T], SendQueue.QueueValue[T]] {
   import SendQueue._
 
   val out: Outlet[T] = Outlet("SendQueue.out")
@@ -95,6 +96,7 @@ private[remote] final class SendQueue[T](deadLetters: ActorRef) extends GraphSta
               tryPush(firstAttempt = false)
           case elem ⇒
             needWakeup = false // there will be another onPull
+            println(s"# SendQueue push $elem") // FIXME
             push(out, elem)
         }
       }
@@ -105,15 +107,17 @@ private[remote] final class SendQueue[T](deadLetters: ActorRef) extends GraphSta
       }
 
       override def postStop(): Unit = {
-        // TODO quarantine will currently always be done when control stream is terminated, see issue #21359
+        var pending = Vector.newBuilder[T]
         if (consumerQueue ne null) {
           var msg = consumerQueue.poll()
           while (msg != null) {
-            deadLetters ! msg
+            pending += msg
             msg = consumerQueue.poll()
           }
           consumerQueue.clear()
         }
+        postStopAction(pending.result())
+
         super.postStop()
       }
 
@@ -129,6 +133,7 @@ private[remote] final class SendQueue[T](deadLetters: ActorRef) extends GraphSta
       }
 
       override def offer(message: T): Boolean = {
+        println(s"# SendQueue offer $message") // FIXME
         val q = producerQueue
         if (q eq null) throw new IllegalStateException("offer not allowed before injecting the queue")
         val result = q.offer(message)

@@ -300,6 +300,8 @@ private[remote] class Association(
 
   def send(message: Any, sender: OptionVal[ActorRef], recipient: OptionVal[RemoteActorRef]): Unit = {
 
+    println(s"# send $message to $recipient") // FIXME
+
     def createOutboundEnvelope(): OutboundEnvelope =
       outboundEnvelopePool.acquire().init(recipient, message.asInstanceOf[AnyRef], sender)
 
@@ -501,10 +503,10 @@ private[remote] class Association(
       if (System.currentTimeMillis() - associationState.lastUsedTimestamp.get >= stopIdleOutboundAfterMillis) {
         var allStopped = true
         streamMatValues.get.foreach {
-          case (queueIndex, OutboundStreamMatValues(killSwitch, _, _)) ⇒
-            if (isStreamActive(queueIndex)) {
+          case (queueIndex, OutboundStreamMatValues(killSwitch, _, stopping)) ⇒
+            if (isStreamActive(queueIndex) && stopping.isEmpty) {
               if (queueIndex != ControlQueueIndex || associationState.pendingSystemMessagesCount.get == 0) {
-                log.debug("Stopping idle outbound stream [{}] to [{}]", queueIndex, remoteAddress)
+                log.info("Stopping idle outbound stream [{}] to [{}]", queueIndex, remoteAddress)
                 setStopReason(queueIndex, OutboundStreamStopIdleSignal)
                 killSwitch.abort(OutboundStreamStopIdleSignal)
               } else {
@@ -525,6 +527,11 @@ private[remote] class Association(
       task.cancel()
     }
 
+  }
+
+  private def sendToDeadLetters[T](pending: Vector[OutboundEnvelope]): Unit = {
+    println(s"# sendToDeadLetters $pending") // FIXME
+    pending.foreach(transport.system.deadLetters ! _)
   }
 
   /**
@@ -563,8 +570,15 @@ private[remote] class Association(
 
     val streamKillSwitch = KillSwitches.shared("outboundControlStreamKillSwitch")
 
+    def sendQueuePostStop[T](pending: Vector[OutboundEnvelope]): Unit = {
+      sendToDeadLetters(pending)
+      val systemMessagesCount = pending.count(env ⇒ env.message.isInstanceOf[SystemMessage])
+      if (systemMessagesCount > 0)
+        quarantine(s"SendQueue stopped with [$systemMessagesCount] pending system messages.")
+    }
+
     val (queueValue, (control, completed)) =
-      Source.fromGraph(new SendQueue[OutboundEnvelope](transport.system.deadLetters))
+      Source.fromGraph(new SendQueue[OutboundEnvelope](sendQueuePostStop))
         .via(streamKillSwitch.flow)
         .toMat(transport.outboundControl(this))(Keep.both)
         .run()(materializer)
@@ -603,7 +617,7 @@ private[remote] class Association(
       val streamKillSwitch = KillSwitches.shared("outboundMessagesKillSwitch")
 
       val (queueValue, testMgmt, changeCompression, completed) =
-        Source.fromGraph(new SendQueue[OutboundEnvelope](transport.system.deadLetters))
+        Source.fromGraph(new SendQueue[OutboundEnvelope](sendToDeadLetters))
           .via(streamKillSwitch.flow)
           .viaMat(transport.outboundTestFlow(this))(Keep.both)
           .toMat(transport.outbound(this))({ case ((a, b), (c, d)) ⇒ (a, b, c, d) }) // "keep all, exploded"
@@ -630,7 +644,7 @@ private[remote] class Association(
 
       val streamKillSwitch = KillSwitches.shared("outboundMessagesKillSwitch")
 
-      val lane = Source.fromGraph(new SendQueue[OutboundEnvelope](transport.system.deadLetters))
+      val lane = Source.fromGraph(new SendQueue[OutboundEnvelope](sendToDeadLetters))
         .via(streamKillSwitch.flow)
         .via(transport.outboundTestFlow(this))
         .viaMat(transport.outboundLane(this))(Keep.both)
@@ -685,7 +699,7 @@ private[remote] class Association(
 
     val streamKillSwitch = KillSwitches.shared("outboundLargeMessagesKillSwitch")
 
-    val (queueValue, completed) = Source.fromGraph(new SendQueue[OutboundEnvelope](transport.system.deadLetters))
+    val (queueValue, completed) = Source.fromGraph(new SendQueue[OutboundEnvelope](sendToDeadLetters))
       .via(streamKillSwitch.flow)
       .via(transport.outboundTestFlow(this))
       .toMat(transport.outboundLarge(this))(Keep.both)
@@ -715,7 +729,10 @@ private[remote] class Association(
         restart()
         startIdleTimer()
       }
-      queues(queueIndex) = LazyQueueWrapper(createQueue(queueCapacity), restartAndStartIdleTimer)
+      val queue =
+        if (queueIndex == ControlQueueIndex) getOrCreateQueueWrapper(queueIndex, queueCapacity).queue
+        else createQueue(queueCapacity)
+      queues(queueIndex) = LazyQueueWrapper(queue, restartAndStartIdleTimer)
       queuesVisibility = true // volatile write for visibility of the queues array
     }
 
@@ -732,33 +749,36 @@ private[remote] class Association(
         materializing.countDown()
       case cause if transport.isShutdown ⇒
         // don't restart after shutdown, but log some details so we notice
-        // for the TCP transport the OutboundStreamStopSignal is "converted" to StreamTcpException
+        // for the TCP transport the ShutdownSignal is "converted" to StreamTcpException
         if (!cause.isInstanceOf[StreamTcpException])
           log.error(cause, s"{} to [{}] failed after shutdown. {}", streamName, remoteAddress, cause.getMessage)
         // countDown the latch in case threads are waiting on the latch in outboundControlIngress method
         materializing.countDown()
       case _: AeronTerminated            ⇒ // shutdown already in progress
       case _: AbruptTerminationException ⇒ // ActorSystem shutdown
-      case cause: GaveUpMessageException ⇒
-        log.debug("{} to [{}] failed. Restarting it. {}", streamName, remoteAddress, cause.getMessage)
-        // restart unconditionally, without counting restarts
-        lazyRestart()
       case cause ⇒
 
         // it might have been stopped as expected due to idle or quarantine
-        // for the TCP transport the OutboundStreamStopSignal is "converted" to StreamTcpException
+        // for the TCP transport the exception is "converted" to StreamTcpException
         val stoppedIdle = cause == OutboundStreamStopIdleSignal ||
           getStopReason(queueIndex).contains(OutboundStreamStopIdleSignal)
         val stoppedQuarantined = cause == OutboundStreamStopQuarantinedSignal ||
           getStopReason(queueIndex).contains(OutboundStreamStopQuarantinedSignal)
 
+        // for some cases restart unconditionally, without counting restarts
+        val bypassRestartCounter = cause match {
+          case _: GaveUpMessageException ⇒ true
+          case _                         ⇒ stoppedIdle || stoppedQuarantined
+        }
+
         if (queueIndex == ControlQueueIndex && !stoppedQuarantined) {
           cause match {
             case _: HandshakeTimeoutException ⇒ // ok, quarantine not possible without UID
             case _ ⇒
-              // must quarantine if all system messages haven't been delivered
+              // Must quarantine if all system messages haven't been delivered.
+              // See also comment in the stoppedIdle case below
               val pending = associationState.pendingSystemMessagesCount.get
-              if (pending != 0)
+              if (pending != 0 && !stoppedIdle)
                 quarantine(s"Outbound control stream restarted with [$pending] system messages. $cause")
           }
         }
@@ -766,10 +786,24 @@ private[remote] class Association(
         if (stoppedIdle) {
           log.debug("{} to [{}] was idle and stopped. It will be restarted if used again.", streamName, remoteAddress)
           lazyRestart()
+          if (queueIndex == ControlQueueIndex && associationState.pendingSystemMessagesCount.get != 0) {
+            // If the reason is that it was idle and it now has pending system messages
+            // those must be in the queue and can still be delivered. Note that the
+            // SendQueue and SystemMessageDelivery stages will quarantine themselves if
+            // they are stopped with pending system messages.
+            controlQueue match {
+              case w: LazyQueueWrapper ⇒
+                log.debug(
+                  "{} to [{}] was idle and stopped, but new system messages triggered immediate start again.",
+                  streamName, remoteAddress)
+                w.runMaterialize()
+              case _ ⇒
+            }
+          }
         } else if (stoppedQuarantined) {
           log.debug("{} to [{}] was quarantined and stopped. It will be restarted if used again.", streamName, remoteAddress)
           lazyRestart()
-        } else if (restartCounter.restart()) {
+        } else if (bypassRestartCounter || restartCounter.restart()) {
           log.error(cause, "{} to [{}] failed. Restarting it. {}", streamName, remoteAddress, cause.getMessage)
           lazyRestart()
         } else {

@@ -31,7 +31,6 @@ import scala.util.control.NoStackTrace
  * INTERNAL API
  */
 private[remote] object SystemMessageDelivery {
-  // FIXME serialization of these messages
   final case class SystemMessageEnvelope(message: AnyRef, seqNo: Long, ackReplyTo: UniqueAddress) extends ArteryMessage
   final case class Ack(seqNo: Long, from: UniqueAddress) extends Reply
   final case class Nack(seqNo: Long, from: UniqueAddress) extends Reply
@@ -92,9 +91,11 @@ private[remote] class SystemMessageDelivery(
       }
 
       override def postStop(): Unit = {
-        // TODO quarantine will currently always be done when control stream is terminated, see issue #21359
+        val pendingCount = unacknowledged.size
         sendUnacknowledgedToDeadLetters()
         unacknowledged.clear()
+        if (pendingCount > 0)
+          outboundContext.quarantine(s"SystemMessageDelivery stopped with [$pendingCount] pending system messages.")
         outboundContext.controlSubject.detach(this)
       }
 
@@ -149,6 +150,7 @@ private[remote] class SystemMessageDelivery(
 
       private def ack(n: Long): Unit = {
         ackTimestamp = System.nanoTime()
+        println(s"# SysDelivery ack $n") // FIXME
         if (n <= seqNo)
           clearUnacknowledged(n)
       }
@@ -175,6 +177,7 @@ private[remote] class SystemMessageDelivery(
 
       // important to not send the buffered instance, since it's mutable
       private def pushCopy(outboundEnvelope: OutboundEnvelope): Unit = {
+        println(s"# SysDelivery pushCopy ${outboundEnvelope.message}") // FIXME
         push(out, outboundEnvelope.copy())
       }
 
@@ -290,8 +293,10 @@ private[remote] class SystemMessageAcker(inboundContext: InboundContext) extends
               inboundContext.sendControl(ackReplyTo.address, Ack(n, localAddress))
               sequenceNumbers = sequenceNumbers.updated(ackReplyTo, n + 1)
               val unwrapped = env.withMessage(sysEnv.message)
+              println(s"# SysDeliveryAcker got ${sysEnv.message}") // FIXME
               push(out, unwrapped)
             } else if (n < expectedSeqNo) {
+              println(s"# SysDeliveryAcker got n < expectedSeqNo $n < $expectedSeqNo  ${sysEnv.message}") // FIXME
               inboundContext.sendControl(ackReplyTo.address, Ack(expectedSeqNo - 1, localAddress))
               pull(in)
             } else {
