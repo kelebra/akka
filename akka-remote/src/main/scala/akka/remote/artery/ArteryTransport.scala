@@ -104,6 +104,7 @@ private[remote] object AssociationState {
       uniqueRemoteAddressPromise = Promise(),
       pendingSystemMessagesCount = new AtomicInteger,
       lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
+      controlIdleKillSwitch = OptionVal.None,
       quarantined = ImmutableLongMap.empty[QuarantinedTimestamp])
 
   final case class QuarantinedTimestamp(nanoTime: Long) {
@@ -120,6 +121,7 @@ private[remote] final class AssociationState(
   val uniqueRemoteAddressPromise: Promise[UniqueAddress],
   val pendingSystemMessagesCount: AtomicInteger,
   val lastUsedTimestamp:          AtomicLong,
+  val controlIdleKillSwitch:      OptionVal[SharedKillSwitch],
   val quarantined:                ImmutableLongMap[AssociationState.QuarantinedTimestamp]) {
 
   import AssociationState.QuarantinedTimestamp
@@ -148,7 +150,7 @@ private[remote] final class AssociationState(
 
   def newIncarnation(remoteAddressPromise: Promise[UniqueAddress]): AssociationState =
     new AssociationState(incarnation + 1, remoteAddressPromise, pendingSystemMessagesCount = new AtomicInteger,
-      lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()), quarantined)
+      lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()), controlIdleKillSwitch, quarantined)
 
   def newQuarantined(): AssociationState =
     uniqueRemoteAddressPromise.future.value match {
@@ -158,6 +160,7 @@ private[remote] final class AssociationState(
           uniqueRemoteAddressPromise,
           pendingSystemMessagesCount = new AtomicInteger,
           lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
+          controlIdleKillSwitch,
           quarantined = quarantined.updated(a.uid, QuarantinedTimestamp(System.nanoTime())))
       case _ ⇒ this
     }
@@ -170,6 +173,10 @@ private[remote] final class AssociationState(
   }
 
   def isQuarantined(uid: Long): Boolean = quarantined.contains(uid)
+
+  def withControlIdleKillSwitch(killSwitch: SharedKillSwitch): AssociationState =
+    new AssociationState(incarnation, uniqueRemoteAddressPromise, pendingSystemMessagesCount, lastUsedTimestamp,
+      controlIdleKillSwitch = OptionVal.Some(killSwitch), quarantined)
 
   override def toString(): String = {
     val a = uniqueRemoteAddressPromise.future.value match {
@@ -211,7 +218,7 @@ private[remote] trait OutboundContext {
   /**
    * @return `true` if any of the streams are active (not stopped due to idle)
    */
-  def isActive(): Boolean
+  def isOrdinaryMessageStreamActive(): Boolean
 
   /**
    * An outbound stage can listen to control messages
@@ -401,7 +408,6 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
       priorityMessageDestinations,
       outboundEnvelopePool))
 
-  // TODO: Consider including in `RemoteTransport`?
   def remoteAddresses: Set[Address] = associationRegistry.allAssociations.map(_.remoteAddress)
 
   override def settings: ArterySettings = provider.remoteSettings.Artery

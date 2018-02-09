@@ -25,6 +25,7 @@ import akka.stream.testkit.scaladsl.TestSink
 import akka.testkit.ImplicitSender
 import akka.testkit.TestActors
 import akka.testkit.TestProbe
+import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import akka.util.OptionVal
 
@@ -32,9 +33,10 @@ object SystemMessageDeliverySpec {
 
   case class TestSysMsg(s: String) extends SystemMessageDelivery.AckedDeliveryMessage
 
-  val config = ConfigFactory.parseString(
-    """
+  def config(transport: String) = ConfigFactory.parseString(
+    s"""
        akka.loglevel = DEBUG
+       akka.remote.artery.transport = $transport
        akka.remote.artery.advanced.stop-idle-outbound-after = 1000 ms
        akka.remote.artery.advanced.inject-handshake-interval = 500 ms
        akka.remote.watch-failure-detector.heartbeat-interval = 2 s
@@ -44,7 +46,11 @@ object SystemMessageDeliverySpec {
 
 }
 
-class SystemMessageDeliverySpec extends ArteryMultiNodeSpec(SystemMessageDeliverySpec.config) with ImplicitSender {
+class SystemMessageDeliveryAeronSpec extends SystemMessageDeliverySpec(SystemMessageDeliverySpec.config("aeron-udp"))
+
+class SystemMessageDeliveryTcpSpec extends SystemMessageDeliverySpec(SystemMessageDeliverySpec.config("tcp"))
+
+abstract class SystemMessageDeliverySpec(conf: Config) extends ArteryMultiNodeSpec(conf) with ImplicitSender {
   import SystemMessageDeliverySpec._
 
   val addressA = UniqueAddress(

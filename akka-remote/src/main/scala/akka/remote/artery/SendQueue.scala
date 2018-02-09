@@ -96,7 +96,6 @@ private[remote] final class SendQueue[T](postStopAction: Vector[T] ⇒ Unit)
               tryPush(firstAttempt = false)
           case elem ⇒
             needWakeup = false // there will be another onPull
-            println(s"# SendQueue push $elem") // FIXME
             push(out, elem)
         }
       }
@@ -133,7 +132,6 @@ private[remote] final class SendQueue[T](postStopAction: Vector[T] ⇒ Unit)
       }
 
       override def offer(message: T): Boolean = {
-        println(s"# SendQueue offer $message") // FIXME
         val q = producerQueue
         if (q eq null) throw new IllegalStateException("offer not allowed before injecting the queue")
         val result = q.offer(message)

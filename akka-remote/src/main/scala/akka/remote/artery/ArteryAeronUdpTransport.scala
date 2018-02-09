@@ -23,6 +23,7 @@ import akka.remote.RemoteActorRefProvider
 import akka.remote.RemoteTransportException
 import akka.remote.artery.compress._
 import akka.stream.KillSwitches
+import akka.stream.SharedKillSwitch
 import akka.stream.scaladsl.Flow
 import akka.stream.scaladsl.Keep
 import akka.stream.scaladsl.Sink
@@ -284,11 +285,15 @@ private[remote] class ArteryAeronUdpTransport(_system: ExtendedActorSystem, _pro
     }
   }
 
-  override protected def outboundTransportSink(outboundContext: OutboundContext, streamId: Int,
-                                               bufferPool: EnvelopeBufferPool): Sink[EnvelopeBuffer, Future[Done]] = {
+  override protected def outboundTransportSink(
+    outboundContext: OutboundContext,
+    streamId:        Int,
+    bufferPool:      EnvelopeBufferPool): Sink[EnvelopeBuffer, Future[Done]] = {
     val giveUpAfter =
       if (streamId == ControlStreamId) settings.Advanced.GiveUpSystemMessageAfter
       else settings.Advanced.GiveUpMessageAfter
+    // Note that the AssociationState.controlStreamIdleKillSwitch in control stream is not used for the
+    // Aeron transport. Would be difficult to handle the Future[Done] materialized value.
     Sink.fromGraph(new AeronSink(outboundChannel(outboundContext.remoteAddress), streamId, aeron, taskRunner,
       bufferPool, giveUpAfter, createFlightRecorderEventSink()))
   }

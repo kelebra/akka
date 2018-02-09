@@ -90,7 +90,7 @@ private[remote] class TestOutboundContext(
     _associationState = _associationState.newQuarantined()
   }
 
-  override def isActive(): Boolean = true
+  override def isOrdinaryMessageStreamActive(): Boolean = true
 
   override def sendControl(message: ControlMessage) = {
     controlProbe.foreach(_ ! message)

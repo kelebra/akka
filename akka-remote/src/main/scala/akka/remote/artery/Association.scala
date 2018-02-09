@@ -94,8 +94,10 @@ private[remote] object Association {
   case object OutboundStreamStopIdleSignal extends RuntimeException("") with StopSignal with NoStackTrace
   case object OutboundStreamStopQuarantinedSignal extends RuntimeException("") with StopSignal with NoStackTrace
 
-  final case class OutboundStreamMatValues(streamKillSwitch: SharedKillSwitch, completed: Future[Done],
-                                           stopping: Option[StopSignal])
+  final case class OutboundStreamMatValues(
+    streamKillSwitch: SharedKillSwitch,
+    completed:        Future[Done],
+    stopping:         Option[StopSignal])
 }
 
 /**
@@ -241,6 +243,11 @@ private[remote] class Association(
   def associationState: AssociationState =
     Unsafe.instance.getObjectVolatile(this, AbstractAssociation.sharedStateOffset).asInstanceOf[AssociationState]
 
+  def setControlIdleKillSwitch(killSwitch: SharedKillSwitch): Unit = {
+    val current = associationState
+    swapState(current, current.withControlIdleKillSwitch(killSwitch))
+  }
+
   def completeHandshake(peer: UniqueAddress): Future[Done] = {
     require(
       remoteAddress == peer.address,
@@ -299,8 +306,6 @@ private[remote] class Association(
   }
 
   def send(message: Any, sender: OptionVal[ActorRef], recipient: OptionVal[RemoteActorRef]): Unit = {
-
-    println(s"# send $message to $recipient") // FIXME
 
     def createOutboundEnvelope(): OutboundEnvelope =
       outboundEnvelopePool.acquire().init(recipient, message.asInstanceOf[AnyRef], sender)
@@ -394,8 +399,8 @@ private[remote] class Association(
     }
   }
 
-  override def isActive(): Boolean =
-    isStreamActive(ControlQueueIndex) || isStreamActive(OrdinaryQueueIndex) || isStreamActive(LargeQueueIndex)
+  override def isOrdinaryMessageStreamActive(): Boolean =
+    isStreamActive(OrdinaryQueueIndex)
 
   def isStreamActive(queueIndex: Int): Boolean = {
     queues(queueIndex) match {
@@ -503,12 +508,25 @@ private[remote] class Association(
       if (System.currentTimeMillis() - associationState.lastUsedTimestamp.get >= stopIdleOutboundAfterMillis) {
         var allStopped = true
         streamMatValues.get.foreach {
-          case (queueIndex, OutboundStreamMatValues(killSwitch, _, stopping)) ⇒
+          case (queueIndex, OutboundStreamMatValues(streamKillSwitch, _, stopping)) ⇒
             if (isStreamActive(queueIndex) && stopping.isEmpty) {
-              if (queueIndex != ControlQueueIndex || associationState.pendingSystemMessagesCount.get == 0) {
+              if (queueIndex != ControlQueueIndex) {
                 log.info("Stopping idle outbound stream [{}] to [{}]", queueIndex, remoteAddress)
                 setStopReason(queueIndex, OutboundStreamStopIdleSignal)
-                killSwitch.abort(OutboundStreamStopIdleSignal)
+                // for non-control streams we can stop the entire stream
+                streamKillSwitch.abort(OutboundStreamStopIdleSignal)
+              } else if (associationState.pendingSystemMessagesCount.get == 0) {
+                // only stop the transport parts of the stream because SystemMessageDelivery stage has
+                // state (seqno) and system messages might be sent at the same time
+                associationState.controlIdleKillSwitch match {
+                  case OptionVal.Some(killSwitch) ⇒
+                    log.info("Stopping idle outbound control stream to [{}]", remoteAddress)
+                    killSwitch.abort(OutboundStreamStopIdleSignal)
+                  case OptionVal.None ⇒
+                    log.debug(
+                      "Couldn't stop idle outbound control stream to [{}] due to missing KillSwitch.",
+                      remoteAddress)
+                }
               } else {
                 log.debug(
                   "Couldn't stop idle outbound control stream to [{}] due to [{}] pending system messages",
@@ -530,7 +548,6 @@ private[remote] class Association(
   }
 
   private def sendToDeadLetters[T](pending: Vector[OutboundEnvelope]): Unit = {
-    println(s"# sendToDeadLetters $pending") // FIXME
     pending.foreach(transport.system.deadLetters ! _)
   }
 
@@ -607,14 +624,15 @@ private[remote] class Association(
 
   private def runOutboundOrdinaryMessagesStream(): Unit = {
     if (transport.isShutdown) throw ShuttingDown
+
+    val streamKillSwitch = KillSwitches.shared("outboundMessagesKillSwitch")
+
     if (outboundLanes == 1) {
       log.debug("Starting outbound message stream to [{}]", remoteAddress)
       val queueIndex = OrdinaryQueueIndex
       val wrapper = getOrCreateQueueWrapper(queueIndex, queueSize)
       queues(queueIndex) = wrapper // use new underlying queue immediately for restarts
       queuesVisibility = true // volatile write for visibility of the queues array
-
-      val streamKillSwitch = KillSwitches.shared("outboundMessagesKillSwitch")
 
       val (queueValue, testMgmt, changeCompression, completed) =
         Source.fromGraph(new SendQueue[OutboundEnvelope](sendToDeadLetters))
@@ -641,8 +659,6 @@ private[remote] class Association(
         queuesVisibility = true // volatile write for visibility of the queues array
         wrapper
       }.toVector
-
-      val streamKillSwitch = KillSwitches.shared("outboundMessagesKillSwitch")
 
       val lane = Source.fromGraph(new SendQueue[OutboundEnvelope](sendToDeadLetters))
         .via(streamKillSwitch.flow)
@@ -814,7 +830,8 @@ private[remote] class Association(
     }
   }
 
-  private def updateStreamMatValues(streamId: Int, streamKillSwitch: SharedKillSwitch, completed: Future[Done]): Unit = {
+  private def updateStreamMatValues(streamId: Int, streamKillSwitch: SharedKillSwitch,
+                                    completed: Future[Done]): Unit = {
     implicit val ec = materializer.executionContext
     updateStreamMatValues(
       streamId,

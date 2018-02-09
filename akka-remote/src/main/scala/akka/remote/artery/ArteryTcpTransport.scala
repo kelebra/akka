@@ -128,10 +128,26 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
           TcpOutbound_Connected,
           s"${outboundContext.remoteAddress.host.get}:${outboundContext.remoteAddress.port.get} " +
             s"/ ${streamName(streamId)}")
-        connectionFlow.mapMaterializedValue(_ ⇒ NotUsed)
-          .recoverWithRetries(1, { case ArteryTransport.ShutdownSignal ⇒ Source.empty })
-          .log(name = s"outbound connection to [${outboundContext.remoteAddress}], ${streamName(streamId)} stream")
-          .addAttributes(Attributes.logLevels(onElement = LogLevels.Off, onFailure = Logging.WarningLevel))
+        val flow =
+          Flow[ByteString]
+            .via(connectionFlow)
+            .recoverWithRetries(1, { case ArteryTransport.ShutdownSignal ⇒ Source.empty })
+            .log(name = s"outbound connection to [${outboundContext.remoteAddress}], ${streamName(streamId)} stream")
+            .addAttributes(Attributes.logLevels(onElement = LogLevels.Off, onFailure = Logging.WarningLevel))
+
+        if (streamId == ControlStreamId) {
+          // must replace the KillSwitch when restarted
+          val controlIdleKillSwitch = KillSwitches.shared("outboundControlStreamIdleKillSwitch")
+          Flow[ByteString]
+            .via(controlIdleKillSwitch.flow)
+            .via(flow)
+            .mapMaterializedValue { _ ⇒
+              outboundContext.asInstanceOf[Association].setControlIdleKillSwitch(controlIdleKillSwitch)
+              NotUsed
+            }
+        } else {
+          flow
+        }
       }
 
       if (streamId == ControlStreamId) {
@@ -142,8 +158,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
           settings.Advanced.GiveUpSystemMessageAfter, 0.1)(flowFactory)
       } else {
         // Best effort retry a few times
-        // FIXME only restart on failures?, but missing in RestartFlow, see https://github.com/akka/akka/pull/23911
-        RestartFlow.withBackoff[ByteString, ByteString](
+        RestartFlow.onFailuresWithBackoff[ByteString, ByteString](
           settings.Advanced.OutboundRestartBackoff,
           settings.Advanced.OutboundRestartBackoff * 5, 0.1, maxRestarts = 3)(flowFactory)
       }
