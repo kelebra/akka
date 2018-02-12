@@ -142,7 +142,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
             .via(controlIdleKillSwitch.flow)
             .via(flow)
             .mapMaterializedValue { _ ⇒
-              outboundContext.asInstanceOf[Association].setControlIdleKillSwitch(controlIdleKillSwitch)
+              outboundContext.asInstanceOf[Association].setControlIdleKillSwitch(OptionVal.Some(controlIdleKillSwitch))
               NotUsed
             }
         } else {

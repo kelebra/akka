@@ -95,9 +95,9 @@ private[remote] object Association {
   case object OutboundStreamStopQuarantinedSignal extends RuntimeException("") with StopSignal with NoStackTrace
 
   final case class OutboundStreamMatValues(
-    streamKillSwitch: SharedKillSwitch,
+    streamKillSwitch: OptionVal[SharedKillSwitch],
     completed:        Future[Done],
-    stopping:         Option[StopSignal])
+    stopping:         OptionVal[StopSignal])
 }
 
 /**
@@ -243,7 +243,7 @@ private[remote] class Association(
   def associationState: AssociationState =
     Unsafe.instance.getObjectVolatile(this, AbstractAssociation.sharedStateOffset).asInstanceOf[AssociationState]
 
-  def setControlIdleKillSwitch(killSwitch: SharedKillSwitch): Unit = {
+  def setControlIdleKillSwitch(killSwitch: OptionVal[SharedKillSwitch]): Unit = {
     val current = associationState
     swapState(current, current.withControlIdleKillSwitch(killSwitch))
   }
@@ -488,8 +488,13 @@ private[remote] class Association(
       if (associationState.isQuarantined())
         streamMatValues.get.foreach {
           case (queueIndex, OutboundStreamMatValues(killSwitch, _, _)) ⇒
-            setStopReason(queueIndex, OutboundStreamStopQuarantinedSignal)
-            killSwitch.abort(OutboundStreamStopQuarantinedSignal)
+            killSwitch match {
+              case OptionVal.Some(k) ⇒
+                setStopReason(queueIndex, OutboundStreamStopQuarantinedSignal)
+                clearStreamKillSwitch(queueIndex, k)
+                k.abort(OutboundStreamStopQuarantinedSignal)
+              case OptionVal.None ⇒ // already aborted
+            }
         }
     }(transport.system.dispatcher)))
   }
@@ -511,16 +516,23 @@ private[remote] class Association(
           case (queueIndex, OutboundStreamMatValues(streamKillSwitch, _, stopping)) ⇒
             if (isStreamActive(queueIndex) && stopping.isEmpty) {
               if (queueIndex != ControlQueueIndex) {
-                log.info("Stopping idle outbound stream [{}] to [{}]", queueIndex, remoteAddress)
-                setStopReason(queueIndex, OutboundStreamStopIdleSignal)
-                // for non-control streams we can stop the entire stream
-                streamKillSwitch.abort(OutboundStreamStopIdleSignal)
+                streamKillSwitch match {
+                  case OptionVal.Some(k) ⇒
+                    // for non-control streams we can stop the entire stream
+                    log.info("Stopping idle outbound stream [{}] to [{}]", queueIndex, remoteAddress)
+                    setStopReason(queueIndex, OutboundStreamStopIdleSignal)
+                    clearStreamKillSwitch(queueIndex, k)
+                    k.abort(OutboundStreamStopIdleSignal)
+                  case OptionVal.None ⇒ // already aborted
+                }
+
               } else if (associationState.pendingSystemMessagesCount.get == 0) {
                 // only stop the transport parts of the stream because SystemMessageDelivery stage has
                 // state (seqno) and system messages might be sent at the same time
                 associationState.controlIdleKillSwitch match {
                   case OptionVal.Some(killSwitch) ⇒
                     log.info("Stopping idle outbound control stream to [{}]", remoteAddress)
+                    setControlIdleKillSwitch(OptionVal.None)
                     killSwitch.abort(OutboundStreamStopIdleSignal)
                   case OptionVal.None ⇒
                     log.debug(
@@ -835,7 +847,8 @@ private[remote] class Association(
     implicit val ec = materializer.executionContext
     updateStreamMatValues(
       streamId,
-      OutboundStreamMatValues(streamKillSwitch, completed.recover { case _ ⇒ Done }, stopping = None))
+      OutboundStreamMatValues(OptionVal.Some(streamKillSwitch), completed.recover { case _ ⇒ Done },
+        stopping = OptionVal.None))
   }
 
   @tailrec private def updateStreamMatValues(streamId: Int, values: OutboundStreamMatValues): Unit = {
@@ -849,16 +862,30 @@ private[remote] class Association(
     val prev = streamMatValues.get()
     prev.get(streamId) match {
       case Some(v) ⇒
-        if (!streamMatValues.compareAndSet(prev, prev.updated(streamId, v.copy(stopping = Some(stopSignal)))))
+        if (!streamMatValues.compareAndSet(prev, prev.updated(streamId, v.copy(stopping = OptionVal.Some(stopSignal)))))
           setStopReason(streamId, stopSignal)
       case None ⇒ throw new IllegalStateException(s"Expected streamMatValues for [$streamId]")
     }
   }
 
-  private def getStopReason(streamId: Int): Option[StopSignal] = {
+  private def getStopReason(streamId: Int): OptionVal[StopSignal] = {
     streamMatValues.get().get(streamId) match {
       case Some(OutboundStreamMatValues(_, _, stopping)) ⇒ stopping
-      case None ⇒ None
+      case None ⇒ OptionVal.None
+    }
+  }
+
+  // after it has been used we remove the kill switch to cleanup some memory,
+  // not a "leak" but a KillSwitch is rather heavy
+  @tailrec private def clearStreamKillSwitch(streamId: Int, old: SharedKillSwitch): Unit = {
+    val prev = streamMatValues.get()
+    prev.get(streamId) match {
+      case Some(v) ⇒
+        if (v.streamKillSwitch.isDefined && (v.streamKillSwitch.get eq old)) {
+          if (!streamMatValues.compareAndSet(prev, prev.updated(streamId, v.copy(streamKillSwitch = OptionVal.None))))
+            clearStreamKillSwitch(streamId, old)
+        }
+      case None ⇒ throw new IllegalStateException(s"Expected streamMatValues for [$streamId]")
     }
   }
 

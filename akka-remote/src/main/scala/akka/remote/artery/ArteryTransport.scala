@@ -174,9 +174,9 @@ private[remote] final class AssociationState(
 
   def isQuarantined(uid: Long): Boolean = quarantined.contains(uid)
 
-  def withControlIdleKillSwitch(killSwitch: SharedKillSwitch): AssociationState =
+  def withControlIdleKillSwitch(killSwitch: OptionVal[SharedKillSwitch]): AssociationState =
     new AssociationState(incarnation, uniqueRemoteAddressPromise, pendingSystemMessagesCount, lastUsedTimestamp,
-      controlIdleKillSwitch = OptionVal.Some(killSwitch), quarantined)
+      controlIdleKillSwitch = killSwitch, quarantined)
 
   override def toString(): String = {
     val a = uniqueRemoteAddressPromise.future.value match {
