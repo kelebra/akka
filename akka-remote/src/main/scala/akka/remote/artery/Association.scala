@@ -5,6 +5,7 @@ package akka.remote.artery
 
 import java.util.Queue
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -131,8 +132,13 @@ private[remote] class Association(
   // the `SendQueue` after materialization. Using same underlying queue. This makes it possible to
   // start sending (enqueuing) to the Association immediate after construction.
 
-  def createQueue(capacity: Int): Queue[OutboundEnvelope] =
-    new ManyToOneConcurrentArrayQueue[OutboundEnvelope](capacity)
+  def createQueue(capacity: Int, queueIndex: Int): Queue[OutboundEnvelope] = {
+    val linked = queueIndex == ControlQueueIndex || queueIndex == LargeQueueIndex
+    if (linked)
+      new LinkedBlockingQueue[OutboundEnvelope](capacity) // less memory than ManyToOneConcurrentArrayQueue
+    else
+      new ManyToOneConcurrentArrayQueue[OutboundEnvelope](capacity)
+  }
 
   private val outboundLanes = advancedSettings.OutboundLanes
   private val controlQueueSize = advancedSettings.OutboundControlQueueSize
@@ -140,15 +146,15 @@ private[remote] class Association(
   private val largeQueueSize = advancedSettings.OutboundLargeMessageQueueSize
 
   private[this] val queues: Array[SendQueue.ProducerApi[OutboundEnvelope]] = new Array(2 + outboundLanes)
-  queues(ControlQueueIndex) = QueueWrapperImpl(createQueue(controlQueueSize)) // control stream
+  queues(ControlQueueIndex) = QueueWrapperImpl(createQueue(controlQueueSize, ControlQueueIndex)) // control stream
   queues(LargeQueueIndex) =
     if (transport.largeMessageChannelEnabled) // large messages stream
-      QueueWrapperImpl(createQueue(largeQueueSize))
+      QueueWrapperImpl(createQueue(largeQueueSize, LargeQueueIndex))
     else
       DisabledQueueWrapper
 
   (0 until outboundLanes).foreach { i ⇒
-    queues(OrdinaryQueueIndex + i) = QueueWrapperImpl(createQueue(queueSize)) // ordinary messages stream
+    queues(OrdinaryQueueIndex + i) = QueueWrapperImpl(createQueue(queueSize, OrdinaryQueueIndex + i)) // ordinary messages stream
   }
   @volatile private[this] var queuesVisibility = false
 
@@ -620,7 +626,8 @@ private[remote] class Association(
       case existing: QueueWrapper ⇒ existing
       case _ ⇒
         // use new queue for restarts
-        QueueWrapperImpl(createQueue(capacity))
+        val linked = queueIndex == ControlQueueIndex || queueIndex == LargeQueueIndex
+        QueueWrapperImpl(createQueue(capacity, queueIndex))
     }
   }
 
@@ -749,7 +756,7 @@ private[remote] class Association(
       }
       val queue =
         if (queueIndex == ControlQueueIndex) getOrCreateQueueWrapper(queueIndex, queueCapacity).queue
-        else createQueue(queueCapacity)
+        else createQueue(queueCapacity, queueIndex)
       queues(queueIndex) = LazyQueueWrapper(queue, restartAndStartIdleTimer)
       queuesVisibility = true // volatile write for visibility of the queues array
     }

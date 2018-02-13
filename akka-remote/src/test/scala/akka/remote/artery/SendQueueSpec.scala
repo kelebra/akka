@@ -58,10 +58,15 @@ class SendQueueSpec extends AkkaSpec("akka.actor.serialize-messages = off") with
   def sendToDeadLetters[T](pending: Vector[T]): Unit =
     pending.foreach(system.deadLetters ! _)
 
+  def createQueue[E](capacity: Int): Queue[E] = {
+    // new java.util.concurrent.LinkedBlockingQueue[E](capacity)
+    new ManyToOneConcurrentArrayQueue[E](capacity)
+  }
+
   "SendQueue" must {
 
     "deliver all messages" in {
-      val queue = new ManyToOneConcurrentArrayQueue[String](128)
+      val queue = createQueue[String](128)
       val (sendQueue, downstream) = Source.fromGraph(new SendQueue[String](sendToDeadLetters))
         .toMat(TestSink.probe)(Keep.both).run()
 
@@ -77,7 +82,7 @@ class SendQueueSpec extends AkkaSpec("akka.actor.serialize-messages = off") with
     }
 
     "deliver messages enqueued before materialization" in {
-      val queue = new ManyToOneConcurrentArrayQueue[String](128)
+      val queue = createQueue[String](128)
       queue.offer("a")
       queue.offer("b")
 
@@ -97,7 +102,7 @@ class SendQueueSpec extends AkkaSpec("akka.actor.serialize-messages = off") with
 
     "deliver bursts of messages" in {
       // this test verifies that the wakeup signal is triggered correctly
-      val queue = new ManyToOneConcurrentArrayQueue[Int](128)
+      val queue = createQueue[Int](128)
       val burstSize = 100
       val (sendQueue, downstream) = Source.fromGraph(new SendQueue[Int](sendToDeadLetters))
         .grouped(burstSize)
@@ -121,7 +126,7 @@ class SendQueueSpec extends AkkaSpec("akka.actor.serialize-messages = off") with
 
     "support multiple producers" in {
       val numberOfProducers = 5
-      val queue = new ManyToOneConcurrentArrayQueue[Msg](numberOfProducers * 512)
+      val queue = createQueue[Msg](numberOfProducers * 512)
       val producers = Vector.tabulate(numberOfProducers)(i ⇒ system.actorOf(producerProps(s"producer-$i")))
 
       // send 100 per producer before materializing
@@ -153,10 +158,10 @@ class SendQueueSpec extends AkkaSpec("akka.actor.serialize-messages = off") with
 
     "deliver first message" in {
 
-      def test(f: (ManyToOneConcurrentArrayQueue[String], SendQueue.QueueValue[String], TestSubscriber.Probe[String]) ⇒ Unit): Unit = {
+      def test(f: (Queue[String], SendQueue.QueueValue[String], TestSubscriber.Probe[String]) ⇒ Unit): Unit = {
 
         (1 to 100).foreach { n ⇒
-          val queue = new ManyToOneConcurrentArrayQueue[String](16)
+          val queue = createQueue[String](16)
           val (sendQueue, downstream) = Source.fromGraph(new SendQueue[String](sendToDeadLetters))
             .toMat(TestSink.probe)(Keep.both).run()
 
