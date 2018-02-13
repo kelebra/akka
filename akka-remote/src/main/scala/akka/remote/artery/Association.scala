@@ -246,6 +246,8 @@ private[remote] class Association(
   def setControlIdleKillSwitch(killSwitch: OptionVal[SharedKillSwitch]): Unit = {
     val current = associationState
     swapState(current, current.withControlIdleKillSwitch(killSwitch))
+    if (killSwitch.isDefined)
+      startIdleTimer()
   }
 
   def completeHandshake(peer: UniqueAddress): Future[Done] = {
@@ -507,11 +509,12 @@ private[remote] class Association(
 
   private def startIdleTimer(): Unit = {
     cancelIdleTimer()
-    val interval = settings.Advanced.StopIdleOutboundAfter / 2
-    val stopIdleOutboundAfterMillis = settings.Advanced.StopIdleOutboundAfter.toMillis
-    val task: Cancellable = transport.system.scheduler.schedule(interval, interval) {
+    val StopIdleOutboundAfter = settings.Advanced.StopIdleOutboundAfter
+    val interval = StopIdleOutboundAfter / 2
+    val stopIdleOutboundAfterMillis = StopIdleOutboundAfter.toMillis
+    val initialDelay = (settings.Advanced.ConnectionTimeout).max(StopIdleOutboundAfter) + 1.second
+    val task: Cancellable = transport.system.scheduler.schedule(initialDelay, interval) {
       if (System.currentTimeMillis() - associationState.lastUsedTimestamp.get >= stopIdleOutboundAfterMillis) {
-        var allStopped = true
         streamMatValues.get.foreach {
           case (queueIndex, OutboundStreamMatValues(streamKillSwitch, _, stopping)) ⇒
             if (isStreamActive(queueIndex) && stopping.isEmpty) {
@@ -543,12 +546,11 @@ private[remote] class Association(
                 log.debug(
                   "Couldn't stop idle outbound control stream to [{}] due to [{}] pending system messages",
                   remoteAddress, associationState.pendingSystemMessagesCount.get)
-                allStopped = false
               }
             }
         }
-        if (allStopped)
-          cancelIdleTimer()
+
+        cancelIdleTimer()
       }
     }(transport.system.dispatcher)
 

@@ -158,7 +158,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
           settings.Advanced.GiveUpSystemMessageAfter, 0.1)(flowFactory)
       } else {
         // Best effort retry a few times
-        RestartFlow.onFailuresWithBackoff[ByteString, ByteString](
+        RestartFlow.withBackoff[ByteString, ByteString](
           settings.Advanced.OutboundRestartBackoff,
           settings.Advanced.OutboundRestartBackoff * 5, 0.1, maxRestarts = 3)(flowFactory)
       }

@@ -14,34 +14,55 @@ import akka.testkit.ImplicitSender
 import akka.testkit.TestActors
 import akka.testkit.TestProbe
 import org.scalatest.concurrent.Eventually
+import org.scalatest.time.Span
 
 class OutboundIdleShutdownAeronSpec extends OutboundIdleShutdownSpec("aeron-udp")
 
 class OutboundIdleShutdownTcpSpec extends OutboundIdleShutdownSpec("tcp")
 
 abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNodeSpec(s"""
-  akka.loglevel=DEBUG
+  akka.loglevel=INFO
   akka.remote.artery.transport = $transport
   akka.remote.artery.advanced.stop-idle-outbound-after = 1 s
+  akka.remote.artery.advanced.connection-timeout = 2 s
   akka.remote.artery.advanced.compression {
     actor-refs.advertisement-interval = 5 seconds
   }
   """) with ImplicitSender with Eventually {
 
+  override implicit val patience: PatienceConfig = PatienceConfig(
+    testKitSettings.DefaultTimeout.duration * 2,
+    Span(200, org.scalatest.time.Millis))
+
+  private def isArteryTcp: Boolean =
+    RARP(system).provider.transport.asInstanceOf[ArteryTransport].settings.Transport == ArterySettings.Tcp
+
+  private def assertStreamActive(association: Association, queueIndex: Int, expected: Boolean): Unit = {
+    if (queueIndex == Association.ControlQueueIndex) {
+      // the control stream is not stopped, but for TCP the connection is closed
+      if (isArteryTcp) {
+        association.associationState.controlIdleKillSwitch.isDefined shouldBe expected
+      }
+    } else {
+      association.isStreamActive(queueIndex) shouldBe expected
+    }
+
+  }
+
   "Outbound streams" should {
-    /* FIXME
+
     "eliminate an association when all streams within are idle" in withAssociation {
       (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
 
         val association = localArtery.association(remoteAddress)
         withClue("When initiating a connection, both the control - and ordinary streams are opened (regardless of which one was used)") {
-          association.isStreamActive(Association.ControlQueueIndex) shouldBe true
-          association.isStreamActive(Association.OrdinaryQueueIndex) shouldBe true
+          assertStreamActive(association, Association.ControlQueueIndex, expected = true)
+          assertStreamActive(association, Association.OrdinaryQueueIndex, expected = true)
         }
 
         eventually {
-          // the control stream is not stopped, but for TCP the connection is closed
-          association.isStreamActive(Association.OrdinaryQueueIndex) shouldBe false
+          assertStreamActive(association, Association.ControlQueueIndex, expected = false)
+          assertStreamActive(association, Association.OrdinaryQueueIndex, expected = false)
         }
 
       // FIXME: Currently we have a memory leak in that "shallow" associations are kept around even though
@@ -49,33 +70,13 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
       //      eventually { localArtery.remoteAddresses shouldBe 'empty }
     }
 
-    "have individual (in)active cycles" in withAssociation {
-      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
-
-        val association = localArtery.association(remoteAddress)
-
-        withClue("When the ordinary stream is used and the control stream is not, the former should be active") {
-          eventually {
-            remoteEcho.tell("ping", localProbe.ref)
-            association.isStreamActive(Association.OrdinaryQueueIndex) shouldBe true
-          }
-        }
-
-        withClue("When the control stream is used and the ordinary stream is not, the former should be active and the latter inactive") {
-          localProbe.watch(remoteEcho)
-          eventually {
-            association.isStreamActive(Association.ControlQueueIndex) shouldBe true
-            association.isStreamActive(Association.OrdinaryQueueIndex) shouldBe false
-          }
-        }
-    }
-
     "still be resumable after the association has been cleaned" in withAssociation {
       (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
         val firstAssociation = localArtery.association(remoteAddress)
 
         eventually {
-          firstAssociation.isOrdinaryMessageStreamActive() shouldBe false
+          assertStreamActive(firstAssociation, Association.ControlQueueIndex, expected = false)
+          assertStreamActive(firstAssociation, Association.OrdinaryQueueIndex, expected = false)
         }
 
         withClue("re-initiating the connection should be the same as starting it the first time") {
@@ -84,8 +85,8 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
             remoteEcho.tell("ping", localProbe.ref)
             localProbe.expectMsg("ping")
             val secondAssociation = localArtery.association(remoteAddress)
-            secondAssociation.isStreamActive(Association.ControlQueueIndex) shouldBe true
-            secondAssociation.isStreamActive(Association.OrdinaryQueueIndex) shouldBe true
+            assertStreamActive(secondAssociation, Association.ControlQueueIndex, expected = true)
+            assertStreamActive(secondAssociation, Association.OrdinaryQueueIndex, expected = true)
           }
 
         }
@@ -100,7 +101,7 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
         localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid)
 
         eventually {
-          association.isStreamActive(Association.OrdinaryQueueIndex) shouldBe false
+          assertStreamActive(association, Association.OrdinaryQueueIndex, expected = false)
         }
         // compression still exists when idle
         localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid)
@@ -108,10 +109,9 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
         localArtery.quarantine(remoteAddress, Some(remoteUid), "Test")
         // after quarantine it should be removed
         eventually {
-          localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should not contain (remoteUid)
+          localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should not contain remoteUid
         }
     }
-    */
 
     "remove inbound compression after restart with same host:port" in withAssociation {
       (remoteSystem, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
@@ -121,7 +121,7 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
 
         localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid)
 
-        shutdown(remoteSystem)
+        shutdown(remoteSystem, verifySystemShutdown = true)
 
         val remoteSystem2 = newRemoteSystem(Some(s"""
           akka.remote.artery.canonical.hostname = ${remoteAddress.host.get}
@@ -133,15 +133,8 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
 
           def remoteEcho = system.actorSelection(RootActorPath(remoteAddress) / "user" / "echo2")
 
-          // FIXME this doesn't work with TCP
-
-          val echoRef = {
-            within(10.seconds) {
-              awaitAssert {
-                println(s"# try") // FIXME
-                remoteEcho.resolveOne(1.seconds).futureValue
-              }
-            }
+          val echoRef = eventually {
+            remoteEcho.resolveOne(1.seconds).futureValue
           }
 
           echoRef.tell("ping2", localProbe.ref)
@@ -156,7 +149,7 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
             localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should contain(remoteUid2)
           }
           eventually {
-            localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should not contain (remoteUid)
+            localArtery.inboundCompressionAccess.get.currentCompressionOriginUids.futureValue should not contain remoteUid
           }
         } finally {
           shutdown(remoteSystem2)
