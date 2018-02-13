@@ -380,7 +380,10 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
   private val outboundEnvelopePool = ReusableOutboundEnvelope.createObjectPool(capacity =
     settings.Advanced.OutboundMessageQueueSize * settings.Advanced.OutboundLanes * 3)
 
-  protected val topLevelFREvents =
+  /**
+   * Thread-safe flight recorder for top level events.
+   */
+  val topLevelFlightRecorder: EventSink =
     createFlightRecorderEventSink(synchr = true)
 
   def createFlightRecorderEventSink(synchr: Boolean = false): EventSink = {
@@ -414,7 +417,7 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
       Runtime.getRuntime.addShutdownHook(shutdownHook)
 
     startTransport()
-    topLevelFREvents.loFreq(Transport_Started, NoMetaData)
+    topLevelFlightRecorder.loFreq(Transport_Started, NoMetaData)
 
     val udp = settings.Transport == ArterySettings.AeronUpd
     val port =
@@ -438,7 +441,7 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
       AddressUidExtension(system).longAddressUid)
 
     // TODO: This probably needs to be a global value instead of an event as events might rotate out of the log
-    topLevelFREvents.loFreq(Transport_UniqueAddressSet, _localAddress.toString())
+    topLevelFlightRecorder.loFreq(Transport_UniqueAddressSet, _localAddress.toString())
 
     materializer = ActorMaterializer.systemMaterializer(settings.Advanced.MaterializerSettings, "remote", system)
     controlMaterializer = ActorMaterializer.systemMaterializer(
@@ -446,10 +449,10 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
       "remoteControl", system)
 
     messageDispatcher = new MessageDispatcher(system, provider)
-    topLevelFREvents.loFreq(Transport_MaterializerStarted, NoMetaData)
+    topLevelFlightRecorder.loFreq(Transport_MaterializerStarted, NoMetaData)
 
     runInboundStreams()
-    topLevelFREvents.loFreq(Transport_StartupFinished, NoMetaData)
+    topLevelFlightRecorder.loFreq(Transport_StartupFinished, NoMetaData)
 
     log.info(
       "Remoting started with transport [Artery {}]; listening on address [{}] with UID [{}]",
@@ -622,7 +625,7 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
     import system.dispatcher
 
     killSwitch.abort(ShutdownSignal)
-    topLevelFREvents.loFreq(Transport_KillSwitchPulled, NoMetaData)
+    topLevelFlightRecorder.loFreq(Transport_KillSwitchPulled, NoMetaData)
     for {
       _ ← streamsCompleted.recover { case _ ⇒ Done }
       _ ← shutdownTransport().recover { case _ ⇒ Done }
@@ -630,7 +633,7 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
       // no need to explicitly shut down the contained access since it's lifecycle is bound to the Decoder
       _inboundCompressionAccess = OptionVal.None
 
-      topLevelFREvents.loFreq(Transport_FlightRecorderClose, NoMetaData)
+      topLevelFlightRecorder.loFreq(Transport_FlightRecorderClose, NoMetaData)
       flightRecorder.foreach(_.close())
       afrFileChannel.foreach(_.force(true))
       afrFileChannel.foreach(_.close())

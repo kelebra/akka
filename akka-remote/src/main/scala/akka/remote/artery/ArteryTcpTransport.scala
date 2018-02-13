@@ -427,7 +427,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
     implicit val ec: ExecutionContext = materializer.executionContext
     inboundKillSwitch.shutdown()
     unbind().map { _ ⇒
-      topLevelFREvents.loFreq(Transport_Stopped, NoMetaData)
+      topLevelFlightRecorder.loFreq(Transport_Stopped, NoMetaData)
       Done
     }
   }
@@ -440,7 +440,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
           b ← binding
           _ ← b.unbind()
         } yield {
-          topLevelFREvents.loFreq(TcpInbound_Bound, s"${localAddress.address.host.get}:${localAddress.address.port}")
+          topLevelFlightRecorder.loFreq(TcpInbound_Bound, s"${localAddress.address.host.get}:${localAddress.address.port}")
           Done
         }
       case None ⇒

@@ -120,7 +120,7 @@ private[remote] class Association(
   import FlightRecorderEvents._
 
   private val log = Logging(transport.system, getClass.getName)
-  private val flightRecorder = transport.createFlightRecorderEventSink(synchr = true)
+  private def flightRecorder = transport.topLevelFlightRecorder
 
   override def settings = transport.settings
   private def advancedSettings = transport.settings.Advanced

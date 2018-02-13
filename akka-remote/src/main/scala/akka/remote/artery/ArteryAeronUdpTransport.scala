@@ -72,12 +72,12 @@ private[remote] class ArteryAeronUdpTransport(_system: ExtendedActorSystem, _pro
     startMediaDriver()
     startAeron()
     startAeronErrorLog()
-    topLevelFREvents.loFreq(Transport_AeronErrorLogStarted, NoMetaData)
+    topLevelFlightRecorder.loFreq(Transport_AeronErrorLogStarted, NoMetaData)
     if (settings.LogAeronCounters) {
       startAeronCounterLog()
     }
     taskRunner.start()
-    topLevelFREvents.loFreq(Transport_TaskRunnerStarted, NoMetaData)
+    topLevelFlightRecorder.loFreq(Transport_TaskRunnerStarted, NoMetaData)
   }
 
   private def startMediaDriver(): Unit = {
@@ -119,7 +119,7 @@ private[remote] class ArteryAeronUdpTransport(_system: ExtendedActorSystem, _pro
 
       val driver = MediaDriver.launchEmbedded(driverContext)
       log.info("Started embedded media driver in directory [{}]", driver.aeronDirectoryName)
-      topLevelFREvents.loFreq(Transport_MediaDriverStarted, driver.aeronDirectoryName())
+      topLevelFlightRecorder.loFreq(Transport_MediaDriverStarted, driver.aeronDirectoryName())
       if (!mediaDriver.compareAndSet(None, Some(driver))) {
         throw new IllegalStateException("media driver started more than once")
       }
@@ -145,7 +145,7 @@ private[remote] class ArteryAeronUdpTransport(_system: ExtendedActorSystem, _pro
       try {
         if (settings.Advanced.DeleteAeronDirectory) {
           IoUtil.delete(new File(driver.aeronDirectoryName), false)
-          topLevelFREvents.loFreq(Transport_MediaFileDeleted, NoMetaData)
+          topLevelFlightRecorder.loFreq(Transport_MediaFileDeleted, NoMetaData)
         }
       } catch {
         case NonFatal(e) ⇒
@@ -399,10 +399,10 @@ private[remote] class ArteryAeronUdpTransport(_system: ExtendedActorSystem, _pro
   override protected def shutdownTransport(): Future[Done] = {
     import system.dispatcher
     taskRunner.stop().map { _ ⇒
-      topLevelFREvents.loFreq(Transport_Stopped, NoMetaData)
+      topLevelFlightRecorder.loFreq(Transport_Stopped, NoMetaData)
       if (aeronErrorLogTask != null) {
         aeronErrorLogTask.cancel()
-        topLevelFREvents.loFreq(Transport_AeronErrorLogTaskStopped, NoMetaData)
+        topLevelFlightRecorder.loFreq(Transport_AeronErrorLogTaskStopped, NoMetaData)
       }
       if (aeron != null) aeron.close()
       if (aeronErrorLog != null) aeronErrorLog.close()
