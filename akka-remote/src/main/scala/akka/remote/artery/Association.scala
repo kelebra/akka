@@ -336,9 +336,7 @@ private[remote] class Association(
         val outboundEnvelope = createOutboundEnvelope()
         message match {
           case _: SystemMessage ⇒
-            state.pendingSystemMessagesCount.incrementAndGet()
             if (!controlQueue.offer(outboundEnvelope)) {
-              state.pendingSystemMessagesCount.decrementAndGet()
               quarantine(reason = s"Due to overflow of control queue, size [$controlQueueSize]")
               dropped(ControlQueueIndex, controlQueueSize, outboundEnvelope)
             }
@@ -529,7 +527,7 @@ private[remote] class Association(
                   case OptionVal.None ⇒ // already aborted
                 }
 
-              } else if (associationState.pendingSystemMessagesCount.get == 0) {
+              } else {
                 // only stop the transport parts of the stream because SystemMessageDelivery stage has
                 // state (seqno) and system messages might be sent at the same time
                 associationState.controlIdleKillSwitch match {
@@ -542,10 +540,6 @@ private[remote] class Association(
                       "Couldn't stop idle outbound control stream to [{}] due to missing KillSwitch.",
                       remoteAddress)
                 }
-              } else {
-                log.debug(
-                  "Couldn't stop idle outbound control stream to [{}] due to [{}] pending system messages",
-                  remoteAddress, associationState.pendingSystemMessagesCount.get)
               }
             }
         }
@@ -805,31 +799,15 @@ private[remote] class Association(
           cause match {
             case _: HandshakeTimeoutException ⇒ // ok, quarantine not possible without UID
             case _ ⇒
-              // Must quarantine if all system messages haven't been delivered.
+              // Must quarantine in case all system messages haven't been delivered.
               // See also comment in the stoppedIdle case below
-              val pending = associationState.pendingSystemMessagesCount.get
-              if (pending != 0 && !stoppedIdle)
-                quarantine(s"Outbound control stream restarted with [$pending] system messages. $cause")
+              quarantine(s"Outbound control stream restarted. $cause")
           }
         }
 
         if (stoppedIdle) {
           log.debug("{} to [{}] was idle and stopped. It will be restarted if used again.", streamName, remoteAddress)
           lazyRestart()
-          if (queueIndex == ControlQueueIndex && associationState.pendingSystemMessagesCount.get != 0) {
-            // If the reason is that it was idle and it now has pending system messages
-            // those must be in the queue and can still be delivered. Note that the
-            // SendQueue and SystemMessageDelivery stages will quarantine themselves if
-            // they are stopped with pending system messages.
-            controlQueue match {
-              case w: LazyQueueWrapper ⇒
-                log.debug(
-                  "{} to [{}] was idle and stopped, but new system messages triggered immediate start again.",
-                  streamName, remoteAddress)
-                w.runMaterialize()
-              case _ ⇒
-            }
-          }
         } else if (stoppedQuarantined) {
           log.debug("{} to [{}] was quarantined and stopped. It will be restarted if used again.", streamName, remoteAddress)
           lazyRestart()

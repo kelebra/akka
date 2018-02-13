@@ -102,7 +102,6 @@ private[remote] object AssociationState {
     new AssociationState(
       incarnation = 1,
       uniqueRemoteAddressPromise = Promise(),
-      pendingSystemMessagesCount = new AtomicInteger,
       lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
       controlIdleKillSwitch = OptionVal.None,
       quarantined = ImmutableLongMap.empty[QuarantinedTimestamp])
@@ -119,7 +118,6 @@ private[remote] object AssociationState {
 private[remote] final class AssociationState(
   val incarnation:                Int,
   val uniqueRemoteAddressPromise: Promise[UniqueAddress],
-  val pendingSystemMessagesCount: AtomicInteger,
   val lastUsedTimestamp:          AtomicLong,
   val controlIdleKillSwitch:      OptionVal[SharedKillSwitch],
   val quarantined:                ImmutableLongMap[AssociationState.QuarantinedTimestamp]) {
@@ -149,7 +147,7 @@ private[remote] final class AssociationState(
   }
 
   def newIncarnation(remoteAddressPromise: Promise[UniqueAddress]): AssociationState =
-    new AssociationState(incarnation + 1, remoteAddressPromise, pendingSystemMessagesCount = new AtomicInteger,
+    new AssociationState(incarnation + 1, remoteAddressPromise,
       lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()), controlIdleKillSwitch, quarantined)
 
   def newQuarantined(): AssociationState =
@@ -158,7 +156,6 @@ private[remote] final class AssociationState(
         new AssociationState(
           incarnation,
           uniqueRemoteAddressPromise,
-          pendingSystemMessagesCount = new AtomicInteger,
           lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
           controlIdleKillSwitch,
           quarantined = quarantined.updated(a.uid, QuarantinedTimestamp(System.nanoTime())))
@@ -175,7 +172,7 @@ private[remote] final class AssociationState(
   def isQuarantined(uid: Long): Boolean = quarantined.contains(uid)
 
   def withControlIdleKillSwitch(killSwitch: OptionVal[SharedKillSwitch]): AssociationState =
-    new AssociationState(incarnation, uniqueRemoteAddressPromise, pendingSystemMessagesCount, lastUsedTimestamp,
+    new AssociationState(incarnation, uniqueRemoteAddressPromise, lastUsedTimestamp,
       controlIdleKillSwitch = killSwitch, quarantined)
 
   override def toString(): String = {
