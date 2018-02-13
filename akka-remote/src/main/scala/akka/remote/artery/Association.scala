@@ -769,6 +769,7 @@ private[remote] class Association(
     streamCompleted.failed.foreach {
       case ArteryTransport.ShutdownSignal ⇒
         // shutdown as expected
+        cancelIdleTimer()
         // countDown the latch in case threads are waiting on the latch in outboundControlIngress method
         materializing.countDown()
       case cause if transport.isShutdown ⇒
@@ -776,10 +777,15 @@ private[remote] class Association(
         // for the TCP transport the ShutdownSignal is "converted" to StreamTcpException
         if (!cause.isInstanceOf[StreamTcpException])
           log.error(cause, s"{} to [{}] failed after shutdown. {}", streamName, remoteAddress, cause.getMessage)
+        cancelIdleTimer()
         // countDown the latch in case threads are waiting on the latch in outboundControlIngress method
         materializing.countDown()
-      case _: AeronTerminated            ⇒ // shutdown already in progress
-      case _: AbruptTerminationException ⇒ // ActorSystem shutdown
+      case _: AeronTerminated ⇒
+        // shutdown already in progress
+        cancelIdleTimer()
+      case _: AbruptTerminationException ⇒
+        // ActorSystem shutdown
+        cancelIdleTimer()
       case cause ⇒
 
         // it might have been stopped as expected due to idle or quarantine
@@ -817,6 +823,7 @@ private[remote] class Association(
         } else {
           log.error(cause, s"{} to [{}] failed and restarted {} times within {} seconds. Terminating system. ${cause.getMessage}",
             streamName, remoteAddress, advancedSettings.OutboundMaxRestarts, advancedSettings.OutboundRestartTimeout.toSeconds)
+          cancelIdleTimer()
           transport.system.terminate()
         }
     }
