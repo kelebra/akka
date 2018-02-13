@@ -161,33 +161,27 @@ private[remote] class Association(
   // in case there is a restart at the same time as a compression table update
   private val changeCompressionTimeout = 5.seconds
 
-  private[remote] def changeActorRefCompression(table: CompressionTable[ActorRef]): Future[Done] = {
-    import transport.system.dispatcher
-    val c = outboundCompressionAccess
-    if (c.isEmpty) Future.successful(Done)
-    else if (c.size == 1) c.head.changeActorRefCompression(table)
-    else Future.sequence(c.map(_.changeActorRefCompression(table))).map(_ ⇒ Done)
-  }
   // keyed by stream queue index
   private[this] val streamMatValues = new AtomicReference(Map.empty[Int, OutboundStreamMatValues])
 
   private[this] val idleTask = new AtomicReference[Option[Cancellable]](None)
   private[this] val quarantinedIdleTask = new AtomicReference[Option[Cancellable]](None)
 
-  private[remote] def changeClassManifestCompression(table: CompressionTable[String]): Future[Done] = {
-    import transport.system.dispatcher
-    val c = outboundCompressionAccess
-    if (c.isEmpty) Future.successful(Done)
-    else if (c.size == 1) c.head.changeClassManifestCompression(table)
-    else Future.sequence(c.map(_.changeClassManifestCompression(table))).map(_ ⇒ Done)
-  }
+  private[remote] def changeActorRefCompression(table: CompressionTable[ActorRef]): Future[Done] =
+    updateOutboundCompression(c ⇒ c.changeActorRefCompression(table))
 
-  private def clearOutboundCompression(): Future[Done] = {
+  private[remote] def changeClassManifestCompression(table: CompressionTable[String]): Future[Done] =
+    updateOutboundCompression(c ⇒ c.changeClassManifestCompression(table))
+
+  private def clearOutboundCompression(): Future[Done] =
+    updateOutboundCompression(c ⇒ c.clearCompression())
+
+  private def updateOutboundCompression(action: OutboundCompressionAccess ⇒ Future[Done]): Future[Done] = {
     import transport.system.dispatcher
     val c = outboundCompressionAccess
     if (c.isEmpty) Future.successful(Done)
-    else if (c.size == 1) c.head.clearCompression()
-    else Future.sequence(c.map(_.clearCompression())).map(_ ⇒ Done)
+    else if (c.size == 1) action(c.head)
+    else Future.sequence(c.map(action(_))).map(_ ⇒ Done)
   }
 
   private def clearInboundCompression(originUid: Long): Unit =
