@@ -292,8 +292,10 @@ private[remote] class ArteryAeronUdpTransport(_system: ExtendedActorSystem, _pro
     val giveUpAfter =
       if (streamId == ControlStreamId) settings.Advanced.GiveUpSystemMessageAfter
       else settings.Advanced.GiveUpMessageAfter
-    // Note that the AssociationState.controlStreamIdleKillSwitch in control stream is not used for the
+    // TODO: Note that the AssociationState.controlStreamIdleKillSwitch in control stream is not used for the
     // Aeron transport. Would be difficult to handle the Future[Done] materialized value.
+    // If we want to stop for Aeron also it is probably easier to stop the publication inside the
+    // AeronSink, i.e. not using a KillSwitch.
     Sink.fromGraph(new AeronSink(outboundChannel(outboundContext.remoteAddress), streamId, aeron, taskRunner,
       bufferPool, giveUpAfter, createFlightRecorderEventSink()))
   }

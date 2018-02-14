@@ -102,7 +102,7 @@ private[remote] object AssociationState {
     new AssociationState(
       incarnation = 1,
       uniqueRemoteAddressPromise = Promise(),
-      lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
+      lastUsedTimestamp = new AtomicLong(System.nanoTime()),
       controlIdleKillSwitch = OptionVal.None,
       quarantined = ImmutableLongMap.empty[QuarantinedTimestamp])
 
@@ -118,7 +118,7 @@ private[remote] object AssociationState {
 private[remote] final class AssociationState(
   val incarnation:                Int,
   val uniqueRemoteAddressPromise: Promise[UniqueAddress],
-  val lastUsedTimestamp:          AtomicLong,
+  val lastUsedTimestamp:          AtomicLong, // System.nanoTime timestamp
   val controlIdleKillSwitch:      OptionVal[SharedKillSwitch],
   val quarantined:                ImmutableLongMap[AssociationState.QuarantinedTimestamp]) {
 
@@ -148,7 +148,7 @@ private[remote] final class AssociationState(
 
   def newIncarnation(remoteAddressPromise: Promise[UniqueAddress]): AssociationState =
     new AssociationState(incarnation + 1, remoteAddressPromise,
-      lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()), controlIdleKillSwitch, quarantined)
+      lastUsedTimestamp = new AtomicLong(System.nanoTime()), controlIdleKillSwitch, quarantined)
 
   def newQuarantined(): AssociationState =
     uniqueRemoteAddressPromise.future.value match {
@@ -156,7 +156,7 @@ private[remote] final class AssociationState(
         new AssociationState(
           incarnation,
           uniqueRemoteAddressPromise,
-          lastUsedTimestamp = new AtomicLong(System.currentTimeMillis()),
+          lastUsedTimestamp = new AtomicLong(System.nanoTime()),
           controlIdleKillSwitch,
           quarantined = quarantined.updated(a.uid, QuarantinedTimestamp(System.nanoTime())))
       case _ ⇒ this
@@ -454,6 +454,8 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
     runInboundStreams()
     topLevelFlightRecorder.loFreq(Transport_StartupFinished, NoMetaData)
 
+    startRemoveQuarantinedAssociationTask()
+
     log.info(
       "Remoting started with transport [Artery {}]; listening on address [{}] with UID [{}]",
       settings.Transport, localAddress.address, localAddress.uid)
@@ -462,6 +464,15 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
   protected def startTransport(): Unit
 
   protected def runInboundStreams(): Unit
+
+  private def startRemoveQuarantinedAssociationTask(): Unit = {
+    val removeAfter = settings.Advanced.RemoveQuarantinedAssociationAfter
+    val interval = removeAfter / 2
+    system.scheduler.schedule(removeAfter, interval) {
+      if (!isShutdown)
+        associationRegistry.removeUnusedQuarantined(removeAfter)
+    }(system.dispatcher)
+  }
 
   // Select inbound lane based on destination to preserve message order,
   // Also include the uid of the sending system in the hash to spread
@@ -715,8 +726,7 @@ private[remote] abstract class ArteryTransport(_system: ExtendedActorSystem, _pr
 
   override def completeHandshake(peer: UniqueAddress): Future[Done] = {
     try {
-      val a = associationRegistry.setUID(peer)
-      a.completeHandshake(peer)
+      associationRegistry.setUID(peer).completeHandshake(peer)
     } catch {
       case ShuttingDown ⇒ Future.successful(Done) // silence it
     }

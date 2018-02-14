@@ -16,15 +16,11 @@ import akka.testkit.TestProbe
 import org.scalatest.concurrent.Eventually
 import org.scalatest.time.Span
 
-class OutboundIdleShutdownAeronSpec extends OutboundIdleShutdownSpec("aeron-udp")
-
-class OutboundIdleShutdownTcpSpec extends OutboundIdleShutdownSpec("tcp")
-
-abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNodeSpec(s"""
+class OutboundIdleShutdownSpec extends ArteryMultiNodeSpec(s"""
   akka.loglevel=INFO
-  akka.remote.artery.transport = $transport
   akka.remote.artery.advanced.stop-idle-outbound-after = 1 s
   akka.remote.artery.advanced.connection-timeout = 2 s
+  akka.remote.artery.advanced.remove-quarantined-association-after = 1 s
   akka.remote.artery.advanced.compression {
     actor-refs.advertisement-interval = 5 seconds
   }
@@ -40,7 +36,9 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
   private def assertStreamActive(association: Association, queueIndex: Int, expected: Boolean): Unit = {
     if (queueIndex == Association.ControlQueueIndex) {
       // the control stream is not stopped, but for TCP the connection is closed
-      if (isArteryTcp) {
+      if (expected)
+        association.isStreamActive(queueIndex) shouldBe expected
+      else if (isArteryTcp && !association.isRemovedAfterQuarantined()) {
         association.associationState.controlIdleKillSwitch.isDefined shouldBe expected
       }
     } else {
@@ -51,11 +49,11 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
 
   "Outbound streams" should {
 
-    "eliminate an association when all streams within are idle" in withAssociation {
+    "be stopped when they are idle" in withAssociation {
       (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
 
         val association = localArtery.association(remoteAddress)
-        withClue("When initiating a connection, both the control - and ordinary streams are opened (regardless of which one was used)") {
+        withClue("When initiating a connection, both the control and ordinary streams are opened") {
           assertStreamActive(association, Association.ControlQueueIndex, expected = true)
           assertStreamActive(association, Association.OrdinaryQueueIndex, expected = true)
         }
@@ -64,13 +62,9 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
           assertStreamActive(association, Association.ControlQueueIndex, expected = false)
           assertStreamActive(association, Association.OrdinaryQueueIndex, expected = false)
         }
-
-      // FIXME: Currently we have a memory leak in that "shallow" associations are kept around even though
-      // the outbound streams are inactive
-      //      eventually { localArtery.remoteAddresses shouldBe 'empty }
     }
 
-    "still be resumable after the association has been cleaned" in withAssociation {
+    "still be resumable after they have been stopped" in withAssociation {
       (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
         val firstAssociation = localArtery.association(remoteAddress)
 
@@ -89,6 +83,33 @@ abstract class OutboundIdleShutdownSpec(transport: String) extends ArteryMultiNo
             assertStreamActive(secondAssociation, Association.OrdinaryQueueIndex, expected = true)
           }
 
+        }
+    }
+
+    "eliminate quarantined association when not used" in withAssociation {
+      (_, remoteAddress, remoteEcho, localArtery, localProbe) ⇒
+
+        val association = localArtery.association(remoteAddress)
+        withClue("When initiating a connection, both the control and ordinary streams are opened") {
+          assertStreamActive(association, Association.ControlQueueIndex, expected = true)
+          assertStreamActive(association, Association.OrdinaryQueueIndex, expected = true)
+        }
+
+        val remoteUid = association.associationState.uniqueRemoteAddress.futureValue.uid
+
+        localArtery.quarantine(remoteAddress, Some(remoteUid), "Test")
+
+        eventually {
+          assertStreamActive(association, Association.ControlQueueIndex, expected = false)
+          assertStreamActive(association, Association.OrdinaryQueueIndex, expected = false)
+        }
+
+        Thread.sleep(2000)
+        //        localArtery.quarantine(remoteAddress, Some(remoteUid), "Test")
+
+        // the outbound streams are inactive and association quarantined, then it's completely removed
+        eventually {
+          localArtery.remoteAddresses should not contain remoteAddress
         }
     }
 

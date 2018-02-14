@@ -33,10 +33,9 @@ object SystemMessageDeliverySpec {
 
   case class TestSysMsg(s: String) extends SystemMessageDelivery.AckedDeliveryMessage
 
-  def config(transport: String) = ConfigFactory.parseString(
+  val config = ConfigFactory.parseString(
     s"""
-       akka.loglevel = DEBUG
-       akka.remote.artery.transport = $transport
+       akka.loglevel = INFO
        akka.remote.artery.advanced.stop-idle-outbound-after = 1000 ms
        akka.remote.artery.advanced.inject-handshake-interval = 500 ms
        akka.remote.watch-failure-detector.heartbeat-interval = 2 s
@@ -46,11 +45,7 @@ object SystemMessageDeliverySpec {
 
 }
 
-class SystemMessageDeliveryAeronSpec extends SystemMessageDeliverySpec(SystemMessageDeliverySpec.config("aeron-udp"))
-
-class SystemMessageDeliveryTcpSpec extends SystemMessageDeliverySpec(SystemMessageDeliverySpec.config("tcp"))
-
-abstract class SystemMessageDeliverySpec(conf: Config) extends ArteryMultiNodeSpec(conf) with ImplicitSender {
+class SystemMessageDeliverySpec extends ArteryMultiNodeSpec(SystemMessageDeliverySpec.config) with ImplicitSender {
   import SystemMessageDeliverySpec._
 
   val addressA = UniqueAddress(

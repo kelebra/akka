@@ -128,6 +128,9 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
           TcpOutbound_Connected,
           s"${outboundContext.remoteAddress.host.get}:${outboundContext.remoteAddress.port.get} " +
             s"/ ${streamName(streamId)}")
+
+        // FIXME use the Flow.lazyInit from https://github.com/akka/akka/pull/24527
+
         val flow =
           Flow[ByteString]
             .via(connectionFlow)
