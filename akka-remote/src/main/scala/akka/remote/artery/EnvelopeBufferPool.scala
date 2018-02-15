@@ -126,7 +126,6 @@ private[remote] object HeaderBuilder {
 private[remote] sealed trait HeaderBuilder {
   def setVersion(v: Byte): Unit
   def version: Byte
-  def positionOfMetaData: Int
 
   def setFlags(v: Byte): Unit
   def flags: Byte
@@ -259,8 +258,6 @@ private[remote] final class HeaderBuilderImpl(
   override def setVersion(v: Byte) = _version = v
   override def version = _version
 
-  def positionOfMetaData: Int = EnvelopeBuffer.MetadataContainerAndLiteralSectionOffset
-
   override def setFlags(v: Byte) = _flags = v
   override def flags = _flags
   override def flag(byteFlag: ByteFlag): Boolean = (_flags.toInt & byteFlag.mask) != 0
@@ -385,11 +382,13 @@ private[remote] final class EnvelopeBuffer(val byteBuffer: ByteBuffer) {
 
   private var literalChars = new Array[Char](64)
   private var literalBytes = new Array[Byte](64)
+
+  // The streamId is only used for TCP transport. It is not part of the ordinary envelope header, but included in the
+  // frame header that is parsed by the TcpFraming stage.
   private var _streamId: Int = -1
   def streamId: Int =
     if (_streamId != -1) _streamId
-    else
-      throw new IllegalStateException("StreamId was not set")
+    else throw new IllegalStateException("StreamId was not set")
   def setStreamId(newStreamId: Int): Unit = _streamId = newStreamId
 
   def writeHeader(h: HeaderBuilder): Unit = writeHeader(h, null)

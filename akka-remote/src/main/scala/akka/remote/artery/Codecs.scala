@@ -488,8 +488,7 @@ private[remote] class Decoder(
             headerBuilder.flags,
             envelope,
             association,
-            lane = 0,
-            positionOfMetaData = headerBuilder.positionOfMetaData)
+            lane = 0)
 
           if (recipient.isEmpty && !headerBuilder.isNoRecipient) {
 

@@ -24,7 +24,7 @@ private[remote] object InboundEnvelope {
     originUid:   Long,
     association: OptionVal[OutboundContext]): InboundEnvelope = {
     val env = new ReusableInboundEnvelope
-    env.init(recipient, sender, originUid, -1, "", 0, null, association, lane = 0, positionOfMetaData = -1)
+    env.init(recipient, sender, originUid, -1, "", 0, null, association, lane = 0)
       .withMessage(message)
   }
 
@@ -49,10 +49,6 @@ private[remote] trait InboundEnvelope {
    * meta data for RemoteInstrument begins.
    */
   def byteBufferStartingAtMetaData(): ByteBuffer
-  /**
-   * The position in the ByteBuffer of the meta data for RemoteInstrument
-   */
-  def positionOfMetaData: Int
 
   def flags: Byte
   def flag(byteFlag: ByteFlag): Boolean
@@ -89,7 +85,6 @@ private[remote] final class ReusableInboundEnvelope extends InboundEnvelope {
   private var _classManifest: String = null
   private var _flags: Byte = 0
   private var _lane: Int = 0
-  private var _positionOfMetaData: Int = 0
   private var _message: AnyRef = null
   private var _envelopeBuffer: EnvelopeBuffer = null
 
@@ -107,11 +102,9 @@ private[remote] final class ReusableInboundEnvelope extends InboundEnvelope {
 
   override def lane: Int = _lane
 
-  override def positionOfMetaData: Int = _positionOfMetaData
-
   override def byteBufferStartingAtMetaData(): ByteBuffer = {
     val buffer = envelopeBuffer.byteBuffer
-    buffer.position(positionOfMetaData)
+    buffer.position(EnvelopeBuffer.MetadataContainerAndLiteralSectionOffset)
     buffer
   }
 
@@ -137,20 +130,18 @@ private[remote] final class ReusableInboundEnvelope extends InboundEnvelope {
     _originUid = 0L
     _association = OptionVal.None
     _lane = 0
-    _positionOfMetaData = 0
   }
 
   def init(
-    recipient:          OptionVal[InternalActorRef],
-    sender:             OptionVal[ActorRef],
-    originUid:          Long,
-    serializer:         Int,
-    classManifest:      String,
-    flags:              Byte,
-    envelopeBuffer:     EnvelopeBuffer,
-    association:        OptionVal[OutboundContext],
-    lane:               Int,
-    positionOfMetaData: Int): InboundEnvelope = {
+    recipient:      OptionVal[InternalActorRef],
+    sender:         OptionVal[ActorRef],
+    originUid:      Long,
+    serializer:     Int,
+    classManifest:  String,
+    flags:          Byte,
+    envelopeBuffer: EnvelopeBuffer,
+    association:    OptionVal[OutboundContext],
+    lane:           Int): InboundEnvelope = {
     _recipient = recipient
     _sender = sender
     _originUid = originUid
@@ -160,7 +151,6 @@ private[remote] final class ReusableInboundEnvelope extends InboundEnvelope {
     _envelopeBuffer = envelopeBuffer
     _association = association
     _lane = lane
-    _positionOfMetaData = positionOfMetaData
     this
   }
 
@@ -172,7 +162,7 @@ private[remote] final class ReusableInboundEnvelope extends InboundEnvelope {
   override def copyForLane(lane: Int): InboundEnvelope = {
     val buf = if (envelopeBuffer eq null) null else envelopeBuffer.copy()
     val env = new ReusableInboundEnvelope
-    env.init(recipient, sender, originUid, serializer, classManifest, flags, buf, association, lane, positionOfMetaData)
+    env.init(recipient, sender, originUid, serializer, classManifest, flags, buf, association, lane)
       .withMessage(message)
 
   }
