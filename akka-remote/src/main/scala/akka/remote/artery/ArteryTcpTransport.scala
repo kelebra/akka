@@ -128,7 +128,6 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
             s"/ ${streamName(streamId)}")
         Flow[ByteString]
           .prepend(Source.single(ByteString(streamId.toByte))) // TODO: maybe use more than a single byte, i.e. a magic to detect weird accesses?
-          //          .via(LogByteStringTools.logByteString(s"->${outboundContext.remoteAddress}-[$streamId]").addAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))) // FIXME
           .via(connectionFlow)
           .mapMaterializedValue(_ ⇒ NotUsed)
           .recoverWithRetries(1, { case ArteryTransport.ShutdownSignal ⇒ Source.empty })
@@ -246,7 +245,6 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
       // must create new Flow for each connection because of the FlightRecorder that can't be shared
       val afr = createFlightRecorderEventSink()
       Flow[ByteString]
-        //.via(LogByteStringTools.logByteString(s"${inboundConnection.localAddress}<-").addAttributes(Attributes.logLevels(onElement = Logging.InfoLevel)))
         .via(inboundKillSwitch.flow)
         .via(new TcpFraming(afr))
         .via(alsoToEagerCancel(inboundStream.get))
