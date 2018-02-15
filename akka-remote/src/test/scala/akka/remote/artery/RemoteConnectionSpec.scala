@@ -11,7 +11,10 @@ import com.typesafe.config.ConfigFactory
 
 import scala.concurrent.duration._
 
-class RemoteConnectionSpec extends ArteryMultiNodeSpec("akka.remote.retry-gate-closed-for = 5s") with ImplicitSender {
+class RemoteConnectionSpec extends ArteryMultiNodeSpec("""
+  akka.remote.retry-gate-closed-for = 5s
+  akka.loglevel = DEBUG
+  """) with ImplicitSender {
 
   def muteSystem(system: ActorSystem) {
     system.eventStream.publish(TestEvent.Mute(

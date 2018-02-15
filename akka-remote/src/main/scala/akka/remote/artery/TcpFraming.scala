@@ -28,13 +28,25 @@ import akka.stream.scaladsl.Framing.FramingException
 @InternalApi private[akka] object TcpFraming {
   val Undefined = Int.MinValue
 
-  def frameHeader(size: Int) =
+  /**
+   * Encode the `frameLength` as 4 bytes
+   */
+  def encodeFrameHeader(frameLength: Int): ByteString =
     ByteString(
-      (size & 0xff).toByte,
-      ((size & 0xff00) >> 8).toByte,
-      ((size & 0xff0000) >> 16).toByte,
-      ((size & 0xff000000) >> 24).toByte
+      (frameLength & 0xff).toByte,
+      ((frameLength & 0xff00) >> 8).toByte,
+      ((frameLength & 0xff0000) >> 16).toByte,
+      ((frameLength & 0xff000000) >> 24).toByte
     )
+
+  /**
+   * Decode the frame length, from first 4 bytes.
+   */
+  def decodeFrameHeader(bytes: ByteString): Int =
+    (bytes(0) & 0xff) << 0 |
+      (bytes(1) & 0xff) << 8 |
+      (bytes(2) & 0xff) << 16 |
+      (bytes(3) & 0xff) << 24
 }
 
 /**
@@ -61,7 +73,9 @@ import akka.stream.scaladsl.Framing.FramingException
         override def onPush(): Unit = {
           val bytes = grab(in)
           streamId = bytes(0) & 0xff
-          if (bytes.size > 1) {
+          if (bytes.size == 1)
+            tryPull()
+          else {
             inBuffer = bytes.drop(1)
             handleBytes()
           }
@@ -97,11 +111,7 @@ import akka.stream.scaladsl.Framing.FramingException
       private def handleBytes(): Unit = {
         if (frameLength == Undefined) {
           if (inBuffer.size >= 4) {
-            frameLength =
-              (inBuffer(0) & 0xff) << 0 |
-                (inBuffer(1) & 0xff) << 8 |
-                (inBuffer(2) & 0xff) << 16 |
-                (inBuffer(3) & 0xff) << 24
+            frameLength = decodeFrameHeader(inBuffer)
             if (frameLength <= 0) // we don't need zero length frames, there will always be a header
               failStage(new FramingException(s"Frame header reported zero or negative size $frameLength"))
             else {

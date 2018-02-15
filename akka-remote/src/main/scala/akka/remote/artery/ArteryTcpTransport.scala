@@ -121,13 +121,14 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
 
     def connectionFlowWithRestart: Flow[ByteString, ByteString, NotUsed] = {
       val flowFactory = () ⇒ {
+
         afr.loFreq(
           TcpOutbound_Connected,
           s"${outboundContext.remoteAddress.host.get}:${outboundContext.remoteAddress.port.get} " +
             s"/ ${streamName(streamId)}")
         Flow[ByteString]
           .prepend(Source.single(ByteString(streamId.toByte))) // TODO: maybe use more than a single byte, i.e. a magic to detect weird accesses?
-          //.via(LogByteStringTools.logByteString(s"->${outboundContext.remoteAddress}-[$streamId]").addAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))) // FIXME
+          //          .via(LogByteStringTools.logByteString(s"->${outboundContext.remoteAddress}-[$streamId]").addAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))) // FIXME
           .via(connectionFlow)
           .mapMaterializedValue(_ ⇒ NotUsed)
           .recoverWithRetries(1, { case ArteryTransport.ShutdownSignal ⇒ Source.empty })
@@ -161,7 +162,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
         val bytes = ByteString(env.byteBuffer)
         bufferPool.release(env)
 
-        TcpFraming.frameHeader(size) ++ bytes
+        TcpFraming.encodeFrameHeader(size) ++ bytes
       }
       .via(connectionFlowWithRestart)
       .map(_ ⇒ throw new IllegalStateException(s"Unexpected incoming bytes in outbound connection to [${outboundContext.remoteAddress}]"))

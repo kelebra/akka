@@ -16,7 +16,7 @@ import akka.testkit.ImplicitSender
 import akka.util.ByteString
 
 class TcpFramingSpec extends AkkaSpec with ImplicitSender {
-  import TcpFraming.frameHeader
+  import TcpFraming.encodeFrameHeader
 
   private val matSettings = ActorMaterializerSettings(system).withFuzzing(true)
   private implicit val mat = ActorMaterializer(matSettings)(system)
@@ -28,7 +28,7 @@ class TcpFramingSpec extends AkkaSpec with ImplicitSender {
   private val payload5 = ByteString((1 to 5).map(_.toByte).toArray)
 
   private def frameBytes(numberOfFrames: Int): ByteString =
-    (1 to numberOfFrames).foldLeft(ByteString.empty)((acc, _) ⇒ acc ++ frameHeader(payload5.size) ++ payload5)
+    (1 to numberOfFrames).foldLeft(ByteString.empty)((acc, _) ⇒ acc ++ encodeFrameHeader(payload5.size) ++ payload5)
 
   private val rndSeed = System.currentTimeMillis()
   private val rnd = new Random(rndSeed)
@@ -49,10 +49,16 @@ class TcpFramingSpec extends AkkaSpec with ImplicitSender {
 
   "TcpFraming stage" must {
 
-    "grab streamId from first frame" in {
+    "grab streamId from first byte" in {
       val bytes = ByteString(2.toByte) ++ frameBytes(1)
       val frames = Source(List(bytes)).via(framingFlow).runWith(Sink.seq).futureValue
       frames.head.streamId should ===(2)
+    }
+
+    "grab streamId from first single byte chunk" in {
+      val frames = Source(List(ByteString(1.toByte), frameBytes(1))).via(framingFlow)
+        .runWith(Sink.seq).futureValue
+      frames.head.streamId should ===(1)
     }
 
     "include streamId in each frame" in {
