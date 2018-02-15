@@ -62,6 +62,22 @@ private[remote] object ByteFlag {
 
 /**
  * INTERNAL API
+ *
+ * The strategy if the header format must be changed in an incompatible way is:
+ * - In the end we only want to support one header format, the latest, but during
+ *   a rolling upgrade period we must support two versions in at least one Akka patch
+ *   release.
+ * - When supporting two version the outbound messages must still be encoded with old
+ *   version. The Decoder on the receiving side must understand both versions.
+ * - Create a new copy of the header encoding/decoding logic (issue #24553: we should refactor to make that easier).
+ * - Bump `ArteryTransport.HighestVersion` and keep `ArterySettings.Version` as the old version.
+ * - Make sure `Decoder` picks the right parsing logic based on the version field in the incoming frame.
+ * - Release Akka, e.g. 2.5.13
+ * - Later, remove the old header parsing logic and bump the `ArterySettings.Version` to the same as
+ *   `ArteryTransport.HighestVersion` again.
+ * - Release Akka, e.g. 2.5.14, and announce that all nodes in the cluster must first be on version
+ *   2.5.13 before upgrading to 2.5.14. That means that it is not supported to do a rolling upgrade
+ *   from 2.5.12 directly to 2.5.14.
  */
 private[remote] object EnvelopeBuffer {
 
@@ -72,24 +88,20 @@ private[remote] object EnvelopeBuffer {
   val MetadataPresentFlag = new ByteFlag(0x1)
 
   val VersionOffset = 0 // Byte
+  val FlagsOffset = 1 // Byte
+  val ActorRefCompressionTableVersionOffset = 2 // Byte
+  val ClassManifestCompressionTableVersionOffset = 3 // Byte
 
-  //val FrameLengthOffset = 1 // Int
-  val StreamIdOffset = 5 // Byte
+  val UidOffset = 4 // Long
+  val SerializerOffset = 12 // Int
 
-  val FlagsOffset = 6 // Byte
-  val ActorRefCompressionTableVersionOffset = 7 // Byte
-  val ClassManifestCompressionTableVersionOffset = 8 // Byte
-
-  val UidOffset = 9 // Long
-  val SerializerOffset = 17 // Int
-
-  val SenderActorRefTagOffset = 21 // Int
-  val RecipientActorRefTagOffset = 25 // Int
-  val ClassManifestTagOffset = 29 // Int
+  val SenderActorRefTagOffset = 16 // Int
+  val RecipientActorRefTagOffset = 20 // Int
+  val ClassManifestTagOffset = 24 // Int
 
   // EITHER metadata followed by literals directly OR literals directly in this spot.
   // Mode depends on the `MetadataPresentFlag`.
-  val MetadataContainerAndLiteralSectionOffset = 33 // Int
+  val MetadataContainerAndLiteralSectionOffset = 28 // Int
 
 }
 
@@ -114,14 +126,7 @@ private[remote] object HeaderBuilder {
 private[remote] sealed trait HeaderBuilder {
   def setVersion(v: Byte): Unit
   def version: Byte
-  def versionPositionAdjust: Int
   def positionOfMetaData: Int
-
-  //def setFrameLength(length: Int): Unit
-  //def frameLength: Int
-
-  //def setStreamId(id: Byte): Unit
-  //def streamId: Byte
 
   def setFlags(v: Byte): Unit
   def flags: Byte
@@ -216,8 +221,6 @@ private[remote] final class HeaderBuilderImpl(
 
   // Fields only available for EnvelopeBuffer
   var _version: Byte = 0
-  //var _frameLength: Int = 0
-  //var _streamId: Byte = 0
   var _flags: Byte = 0
   var _uid: Long = 0
   var _inboundActorRefCompressionTableVersion: Byte = 0
@@ -240,7 +243,6 @@ private[remote] final class HeaderBuilderImpl(
     // which owns the HeaderBuilder instance. Those are never changed.
     // version, uid, streamId
 
-    //_frameLength = 0
     _flags = 0
     _senderActorRef = null
     _senderActorRefIdx = -1
@@ -257,19 +259,7 @@ private[remote] final class HeaderBuilderImpl(
   override def setVersion(v: Byte) = _version = v
   override def version = _version
 
-  def versionPositionAdjust: Int = {
-    // frameLength and streamId were added in version 1
-    if (_version == 0) 5
-    else 0
-  }
-
-  def positionOfMetaData: Int = EnvelopeBuffer.MetadataContainerAndLiteralSectionOffset - versionPositionAdjust
-
-  //def setFrameLength(length: Int): Unit = _frameLength = length
-  //def frameLength: Int = _frameLength
-
-  //def setStreamId(id: Byte): Unit = _streamId = id
-  //def streamId: Byte = _streamId
+  def positionOfMetaData: Int = EnvelopeBuffer.MetadataContainerAndLiteralSectionOffset
 
   override def setFlags(v: Byte) = _flags = v
   override def flags = _flags
@@ -373,8 +363,6 @@ private[remote] final class HeaderBuilderImpl(
 
   override def toString =
     "HeaderBuilderImpl(" +
-      //"frameLength:" + frameLength + ", " +
-      //"streamId:" + streamId + ", " +
       "version:" + version + ", " +
       "flags:" + ByteFlag.binaryLeftPad(flags) + ", " +
       "UID:" + uid + ", " +
@@ -413,49 +401,42 @@ private[remote] final class EnvelopeBuffer(val byteBuffer: ByteBuffer) {
     // Write fixed length parts
     byteBuffer.put(VersionOffset, header.version)
 
-    // frameLength and streamId were added in version 1
-    /*if (header.version >= 1) {
-      byteBuffer.putInt(FrameLengthOffset, header.frameLength)
-      byteBuffer.putInt(StreamIdOffset, header.streamId)
-    }*/
-    val adjust = header.versionPositionAdjust
-
-    byteBuffer.put(FlagsOffset - adjust, header.flags)
+    byteBuffer.put(FlagsOffset, header.flags)
     // compression table version numbers
-    byteBuffer.put(ActorRefCompressionTableVersionOffset - adjust, header.outboundActorRefCompression.version)
-    byteBuffer.put(ClassManifestCompressionTableVersionOffset - adjust, header.outboundClassManifestCompression.version)
-    byteBuffer.putLong(UidOffset - adjust, header.uid)
-    byteBuffer.putInt(SerializerOffset - adjust, header.serializer)
+    byteBuffer.put(ActorRefCompressionTableVersionOffset, header.outboundActorRefCompression.version)
+    byteBuffer.put(ClassManifestCompressionTableVersionOffset, header.outboundClassManifestCompression.version)
+    byteBuffer.putLong(UidOffset, header.uid)
+    byteBuffer.putInt(SerializerOffset, header.serializer)
 
     // maybe write some metadata
     // after metadata is written (or not), buffer is at correct position to continue writing literals
-    byteBuffer.position(MetadataContainerAndLiteralSectionOffset - adjust)
+    byteBuffer.position(MetadataContainerAndLiteralSectionOffset)
     if (header._remoteInstruments.isDefined) {
       header._remoteInstruments.get.serialize(OptionVal(oe), byteBuffer)
-      if (byteBuffer.position() != MetadataContainerAndLiteralSectionOffset - adjust) {
+      if (byteBuffer.position() != MetadataContainerAndLiteralSectionOffset) {
         // we actually wrote some metadata so update the flag field to reflect that
         header.setFlag(MetadataPresentFlag)
-        byteBuffer.put(FlagsOffset - adjust, header.flags)
+        byteBuffer.put(FlagsOffset, header.flags)
       }
     }
 
     // Serialize sender
     if (header._senderActorRefIdx != -1)
-      byteBuffer.putInt(SenderActorRefTagOffset - adjust, header._senderActorRefIdx | TagTypeMask)
+      byteBuffer.putInt(SenderActorRefTagOffset, header._senderActorRefIdx | TagTypeMask)
     else
-      writeLiteral(SenderActorRefTagOffset - adjust, header._senderActorRef)
+      writeLiteral(SenderActorRefTagOffset, header._senderActorRef)
 
     // Serialize recipient
     if (header._recipientActorRefIdx != -1)
-      byteBuffer.putInt(RecipientActorRefTagOffset - adjust, header._recipientActorRefIdx | TagTypeMask)
+      byteBuffer.putInt(RecipientActorRefTagOffset, header._recipientActorRefIdx | TagTypeMask)
     else
-      writeLiteral(RecipientActorRefTagOffset - adjust, header._recipientActorRef)
+      writeLiteral(RecipientActorRefTagOffset, header._recipientActorRef)
 
     // Serialize class manifest
     if (header._manifestIdx != -1)
-      byteBuffer.putInt(ClassManifestTagOffset - adjust, header._manifestIdx | TagTypeMask)
+      byteBuffer.putInt(ClassManifestTagOffset, header._manifestIdx | TagTypeMask)
     else
-      writeLiteral(ClassManifestTagOffset - adjust, header._manifest)
+      writeLiteral(ClassManifestTagOffset, header._manifest)
   }
 
   def parseHeader(h: HeaderBuilder): Unit = {
@@ -469,21 +450,14 @@ private[remote] final class EnvelopeBuffer(val byteBuffer: ByteBuffer) {
         s"Incompatible protocol version [${header.version}], " +
           s"highest known version for this node is [${ArteryTransport.HighestVersion}]")
 
-    // frameLength and streamId were added in version 1
-    /*if (header.version >= 1) {
-      header.setFrameLength(byteBuffer.getInt(FrameLengthOffset))
-      header.setStreamId(byteBuffer.get(StreamIdOffset))
-    }*/
-    val adjust = header.versionPositionAdjust
-
-    header.setFlags(byteBuffer.get(FlagsOffset - adjust))
+    header.setFlags(byteBuffer.get(FlagsOffset))
     // compression table versions (stored in the Tag)
-    header._inboundActorRefCompressionTableVersion = byteBuffer.get(ActorRefCompressionTableVersionOffset - adjust)
-    header._inboundClassManifestCompressionTableVersion = byteBuffer.get(ClassManifestCompressionTableVersionOffset - adjust)
-    header.setUid(byteBuffer.getLong(UidOffset - adjust))
-    header.setSerializer(byteBuffer.getInt(SerializerOffset - adjust))
+    header._inboundActorRefCompressionTableVersion = byteBuffer.get(ActorRefCompressionTableVersionOffset)
+    header._inboundClassManifestCompressionTableVersion = byteBuffer.get(ClassManifestCompressionTableVersionOffset)
+    header.setUid(byteBuffer.getLong(UidOffset))
+    header.setSerializer(byteBuffer.getInt(SerializerOffset))
 
-    byteBuffer.position(MetadataContainerAndLiteralSectionOffset - adjust)
+    byteBuffer.position(MetadataContainerAndLiteralSectionOffset)
     if (header.flag(MetadataPresentFlag)) {
       // metadata present, so we need to fast forward to the literals that start right after
       val totalMetadataLength = byteBuffer.getInt()
@@ -491,7 +465,7 @@ private[remote] final class EnvelopeBuffer(val byteBuffer: ByteBuffer) {
     }
 
     // Deserialize sender
-    val senderTag = byteBuffer.getInt(SenderActorRefTagOffset - adjust)
+    val senderTag = byteBuffer.getInt(SenderActorRefTagOffset)
     if ((senderTag & TagTypeMask) != 0) {
       val idx = senderTag & TagValueMask
       header._senderActorRef = null
@@ -501,7 +475,7 @@ private[remote] final class EnvelopeBuffer(val byteBuffer: ByteBuffer) {
     }
 
     // Deserialize recipient
-    val recipientTag = byteBuffer.getInt(RecipientActorRefTagOffset - adjust)
+    val recipientTag = byteBuffer.getInt(RecipientActorRefTagOffset)
     if ((recipientTag & TagTypeMask) != 0) {
       val idx = recipientTag & TagValueMask
       header._recipientActorRef = null
@@ -511,7 +485,7 @@ private[remote] final class EnvelopeBuffer(val byteBuffer: ByteBuffer) {
     }
 
     // Deserialize class manifest
-    val manifestTag = byteBuffer.getInt(ClassManifestTagOffset - adjust)
+    val manifestTag = byteBuffer.getInt(ClassManifestTagOffset)
     if ((manifestTag & TagTypeMask) != 0) {
       val idx = manifestTag & TagValueMask
       header._manifest = null

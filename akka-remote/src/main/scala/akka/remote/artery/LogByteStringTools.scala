@@ -1,3 +1,6 @@
+/**
+ * Copyright (C) 2018 Lightbend Inc. <http://www.lightbend.com>
+ */
 package akka.remote.artery
 
 import akka.NotUsed

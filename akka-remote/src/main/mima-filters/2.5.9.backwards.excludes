@@ -20,6 +20,7 @@ ProblemFilters.exclude[IncompatibleResultTypeProblem]("akka.remote.artery.Artery
 ProblemFilters.exclude[ReversedMissingMethodProblem]("akka.remote.artery.EventSink.loFreq")
 ProblemFilters.exclude[ReversedMissingMethodProblem]("akka.remote.artery.EventSink.alert")
 ProblemFilters.exclude[DirectMissingMethodProblem]("akka.remote.artery.FlightRecorderEvents.Transport_AeronStarted")
+ProblemFilters.exclude[DirectMissingMethodProblem]("akka.remote.artery.Decoder.this")
 
 
 

@@ -81,13 +81,12 @@ private[akka] final class ArterySettings private (config: Config) {
       s""""${AeronUpd.configName}", "${Tcp.configName}", or "${TlsTcp.configName}"""")
   }
 
-  val Version: Byte = Transport match {
-    case AeronUpd ⇒
-      // using older version for Aeron for backwards compatibility,
-      // and the new fields (FrameLength, StreamId) are not needed for Aeron
-      0
-    case Tcp | TlsTcp ⇒ ArteryTransport.HighestVersion
-  }
+  /**
+   * Used version of the header format for outbound messages.
+   * To support rolling upgrades this may be a lower version than `ArteryTransport.HighestVersion`,
+   * which is the highest supported version on receiving (decoding) side.
+   */
+  val Version: Byte = ArteryTransport.HighestVersion
 
   object Advanced {
     val config: Config = getConfig("advanced")

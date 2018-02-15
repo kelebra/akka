@@ -855,9 +855,11 @@ private[remote] object ArteryTransport {
 
   val ProtocolName = "akka"
 
-  // Note that the actual Version is in ArterySettings, and may depend on the used transport.
-  // This is the highest supported version on receiving (decoding) side
-  val HighestVersion: Byte = 1
+  // Note that the used version of the header format for outbound messages is defined in
+  // `ArterySettings.Version` because that may depend on configuration settings.
+  // This is the highest supported version on receiving (decoding) side.
+  // ArterySettings.Version can be lower than this HighestVersion to support rolling upgrades.
+  val HighestVersion: Byte = 0
 
   class AeronTerminated(e: Throwable) extends RuntimeException(e)
 

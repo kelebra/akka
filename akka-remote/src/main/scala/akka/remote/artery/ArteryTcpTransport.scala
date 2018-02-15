@@ -4,8 +4,6 @@
 package akka.remote.artery
 
 import java.net.InetSocketAddress
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext
@@ -37,7 +35,6 @@ import akka.stream.SharedKillSwitch
 import akka.stream.SinkShape
 import akka.stream.scaladsl.Broadcast
 import akka.stream.scaladsl.Flow
-import akka.stream.scaladsl.Framing
 import akka.stream.scaladsl.GraphDSL
 import akka.stream.scaladsl.Keep
 import akka.stream.scaladsl.MergeHub
@@ -50,8 +47,6 @@ import akka.stream.scaladsl.Tcp.IncomingConnection
 import akka.stream.scaladsl.Tcp.ServerBinding
 import akka.util.ByteString
 import akka.util.OptionVal
-
-import scala.annotation.tailrec
 
 /**
  * INTERNAL API
@@ -132,7 +127,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
             s"/ ${streamName(streamId)}")
         Flow[ByteString]
           .prepend(Source.single(ByteString(streamId.toByte))) // TODO: maybe use more than a single byte, i.e. a magic to detect weird accesses?
-          //.via(LogByteStringTools.logByteString(s"->${outboundContext.remoteAddress}-[$streamId]").addAttributes(Attributes.logLevels(onElement = Logging.InfoLevel)))
+          //.via(LogByteStringTools.logByteString(s"->${outboundContext.remoteAddress}-[$streamId]").addAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))) // FIXME
           .via(connectionFlow)
           .mapMaterializedValue(_ ⇒ NotUsed)
           .recoverWithRetries(1, { case ArteryTransport.ShutdownSignal ⇒ Source.empty })
@@ -161,19 +156,12 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
         // TODO Possible performance improvement, could we reduce the copying of bytes?
         afr.hiFreq(TcpOutbound_Sent, env.byteBuffer.limit)
         val size = env.byteBuffer.limit
-        //println(s"Encoding $size with last byte of buffer being ${env.byteBuffer.get(size - 1).toHexString} on stream $streamId")
-        val frameHeader =
-          ByteString(
-            (size & 0xff).toByte,
-            ((size & 0xff00) >> 8).toByte,
-            ((size & 0xff0000) >> 16).toByte,
-            ((size & 0xff000000) >> 24).toByte
-          )
+        //println(s"Encoding $size with last byte of buffer being ${env.byteBuffer.get(size - 1).toHexString} on stream $streamId") // FIXME
 
         val bytes = ByteString(env.byteBuffer)
         bufferPool.release(env)
 
-        frameHeader ++ bytes
+        TcpFraming.frameHeader(size) ++ bytes
       }
       .via(connectionFlowWithRestart)
       .map(_ ⇒ throw new IllegalStateException(s"Unexpected incoming bytes in outbound connection to [${outboundContext.remoteAddress}]"))
@@ -259,71 +247,7 @@ private[remote] class ArteryTcpTransport(_system: ExtendedActorSystem, _provider
       Flow[ByteString]
         //.via(LogByteStringTools.logByteString(s"${inboundConnection.localAddress}<-").addAttributes(Attributes.logLevels(onElement = Logging.InfoLevel)))
         .via(inboundKillSwitch.flow)
-        .statefulMapConcat { () ⇒
-          val Undefined = Int.MinValue
-          var streamId: Int = Undefined
-          var frameLength: Int = Undefined
-          var inBuffer: ByteString = ByteString.empty
-
-          { bytes: ByteString ⇒
-            def createBuffer(bs: ByteString): EnvelopeBuffer = {
-              //println(s"Got packet with last byte ${bs(bs.size - 1).toHexString} on stream $streamId")
-              val buffer = ByteBuffer.wrap(bs.toArray)
-              buffer.order(ByteOrder.LITTLE_ENDIAN)
-              afr.hiFreq(TcpInbound_Received, buffer.limit)
-              val res = new EnvelopeBuffer(buffer)
-              res.setStreamId(streamId)
-              res
-            }
-            @tailrec
-            def handleBytes(): List[EnvelopeBuffer] = {
-              if (frameLength == Undefined) {
-                if (inBuffer.size >= 4) {
-                  frameLength =
-                    (inBuffer(0) & 0xff) << 0 |
-                      (inBuffer(1) & 0xff) << 8 |
-                      (inBuffer(2) & 0xff) << 16 |
-                      (inBuffer(3) & 0xff) << 24
-                  //println(s"[${inboundConnection.localAddress}<-] Got frameLength $frameLength on stream $streamId")
-                  inBuffer = inBuffer.drop(4)
-                  handleBytes()
-                } else Nil // wait for more frameLength bytes
-              } else {
-                if (inBuffer.size >= frameLength) {
-                  // TODO: optimize to emit multiple frames in one go
-                  val outFrame = createBuffer(inBuffer.take(frameLength))
-                  inBuffer = inBuffer.drop(frameLength)
-                  frameLength = Undefined
-                  outFrame :: Nil
-                } else Nil // wait for more frame bytes
-              }
-            }
-
-            if (bytes.isEmpty) Nil
-            else {
-              if (streamId == Undefined) {
-                streamId = bytes(0) & 0xff
-                //println(s"[${inboundConnection.localAddress}<-] Stream was initialized to id $streamId")
-                if (bytes.size > 1) {
-                  inBuffer = bytes.drop(1)
-                  handleBytes()
-                } else
-                  Nil
-              } else {
-                inBuffer ++= bytes
-                handleBytes()
-              }
-            }
-          }
-        }
-        /*.via(Framing.lengthField(fieldLength = 4, fieldOffset = EnvelopeBuffer.FrameLengthOffset,
-          maxFrameSize, byteOrder = ByteOrder.LITTLE_ENDIAN))
-        .map { frame ⇒
-          val buffer = ByteBuffer.wrap(frame.toArray)
-          buffer.order(ByteOrder.LITTLE_ENDIAN)
-          afr.hiFreq(TcpInbound_Received, buffer.limit)
-          new EnvelopeBuffer(buffer)
-        }*/
+        .via(new TcpFraming(afr))
         .via(alsoToEagerCancel(inboundStream.get))
         .filter(_ ⇒ false) // don't send back anything in this TCP socket
         .map(_ ⇒ ByteString.empty) // make it a Flow[ByteString] again

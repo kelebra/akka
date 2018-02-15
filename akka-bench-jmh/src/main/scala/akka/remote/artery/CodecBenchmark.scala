@@ -127,8 +127,6 @@ class CodecBenchmark {
     } else null
     val envelope = new EnvelopeBuffer(envelopeTemplateBuffer)
     val outboundEnvelope = OutboundEnvelope(OptionVal.None, payload, OptionVal.None)
-    //headerIn setFrameLength 100
-    //headerIn setStreamId 1
     headerIn setVersion ArteryTransport.HighestVersion
     headerIn setUid 42
     headerIn setSenderActorRef actorOnSystemA
